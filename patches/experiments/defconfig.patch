@@ -1,0 +1,38 @@
+--- out/x86_64_virt/ohos-dbg/verify_bootfix/ptl_standard_defconfig.orig	2026-09-28 13:28:08.326895242 +0800
++++ kernel/linux/config/linux-7.2/arch/x86/configs/ptl_standard_defconfig	2026-09-28 12:57:17.042758240 +0800
+@@ -1685,7 +1685,7 @@
+ CONFIG_DMI_SCAN_MACHINE_NON_EFI_FALLBACK=y
+ # CONFIG_FW_CFG_SYSFS is not set
+ CONFIG_SYSFB=y
+-# CONFIG_SYSFB_SIMPLEFB is not set
++CONFIG_SYSFB_SIMPLEFB=y
+ # CONFIG_GOOGLE_FIRMWARE is not set
+ 
+ #
+@@ -3538,7 +3538,7 @@
+ # Drivers for system framebuffers
+ #
+ # CONFIG_DRM_EFIDRM is not set
+-# CONFIG_DRM_SIMPLEDRM is not set
++CONFIG_DRM_SIMPLEDRM=y
+ # CONFIG_DRM_VESADRM is not set
+ # end of Drivers for system framebuffers
+ 
+@@ -4507,7 +4507,7 @@
+ # CONFIG_USB_STORAGE_KARMA is not set
+ # CONFIG_USB_STORAGE_CYPRESS_ATACB is not set
+ # CONFIG_USB_STORAGE_ENE_UB6250 is not set
+-# CONFIG_USB_UAS is not set
++CONFIG_USB_UAS=y
+ 
+ #
+ # USB Imaging devices
+@@ -5254,7 +5254,7 @@
+ CONFIG_EXFAT_FS=y
+ CONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"
+ # CONFIG_NTFS_FS is not set
+-# CONFIG_NTFS3_FS is not set
++CONFIG_NTFS3_FS=y
+ # end of DOS/FAT/EXFAT/NT Filesystems
+ 
+ #

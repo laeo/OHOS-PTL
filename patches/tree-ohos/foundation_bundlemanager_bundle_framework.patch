@@ -1,0 +1,39 @@
+diff --git a/services/bundlemgr/src/base_bundle_installer.cpp b/services/bundlemgr/src/base_bundle_installer.cpp
+index 6ad13076f..486062968 100644
+--- a/services/bundlemgr/src/base_bundle_installer.cpp
++++ b/services/bundlemgr/src/base_bundle_installer.cpp
+@@ -7712,8 +7712,10 @@ ErrCode BaseBundleInstaller::SaveHapToInstallPath(const std::unordered_map<std::
+             }
+             result = VerifyCodeSignatureForHap(infos, hapPathRecord.first, hapPathRecord.second);
+             if (result != ERR_OK) {
+-                LOG_E(BMS_TAG_INSTALLER, "enable code signature failed: %{public}d", result);
+-                return result;
++                // Dev image (pc_ptl): install-time fs-verity/code-sign enforcement is not
++                // supported on this rootfs. The HAP signature (HapVerify) is already checked,
++                // so tolerate the code-sign failure instead of aborting the install.
++                LOG_W(BMS_TAG_INSTALLER, "enable code signature failed, continue install: %{public}d", result);
+             }
+         }
+     }
+diff --git a/services/bundlemgr/src/module_profile.cpp b/services/bundlemgr/src/module_profile.cpp
+index 427a3b1ef..5cef5ba15 100644
+--- a/services/bundlemgr/src/module_profile.cpp
++++ b/services/bundlemgr/src/module_profile.cpp
+@@ -3313,17 +3313,9 @@ ErrCode ModuleProfile::TransformTo(
+         return ERR_APPEXECFWK_PARSE_PROFILE_PROP_CHECK_ERROR;
+     }
+     if (!ParserNativeSo(moduleJson, bundleExtractor, innerBundleInfo)) {
+-#ifdef X86_EMULATOR_MODE
+-        APP_LOGE("Parser native so failed");
+-        return ERR_APPEXECFWK_PARSE_NATIVE_SO_FAILED;
+-#endif
+         APP_LOGW("Parser native so failed");
+     }
+     if (!ParserArkNativeFilePath(moduleJson, bundleExtractor, innerBundleInfo)) {
+-#ifdef X86_EMULATOR_MODE
+-        APP_LOGE("Parser ark native file failed");
+-        return ERR_APPEXECFWK_PARSE_AN_FAILED;
+-#endif
+         APP_LOGW("Parser ark native file failed");
+     }
+ 

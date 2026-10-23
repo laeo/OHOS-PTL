@@ -1,0 +1,129 @@
+# OHOS Rime pinyin schema backed by the rime-ice (雾凇拼音) dictionary.
+# No Lua plugins are used: pure script_translator + simplifier + punctuator.
+---
+schema:
+  schema_id: rime_ice_ohos
+  name: 雾凇拼音
+  version: "1.0.0"
+  author:
+    - OHOS Rime
+  description: |
+    基于雾凇拼音（rime-ice）词库的 OHOS 拼音输入方案。
+    词库来源 https://github.com/iDvel/rime-ice (GPL-3.0)
+  dependencies: []
+
+switches:
+  - name: ascii_mode
+    reset: 0
+    states: [ 中文, English ]
+  - name: full_shape
+    reset: 0
+    states: [ 半角, 全角 ]
+  - name: ascii_punct
+    reset: 0
+    states: [ 。，, ．， ]
+  - name: traditionalization
+    reset: 0
+    states: [ 简体, 繁體 ]
+
+engine:
+  processors:
+    - ascii_composer
+    - recognizer
+    - key_binder
+    - speller
+    - punctuator
+    - selector
+    - navigator
+    - express_editor
+  segmentors:
+    - ascii_segmentor
+    - matcher
+    - abc_segmentor
+    - punct_segmentor
+    - fallback_segmentor
+  translators:
+    - punct_translator
+    - script_translator
+  filters:
+    - simplifier@traditionalize
+    - uniquifier
+
+speller:
+  alphabet: zyxwvutsrqponmlkjihgfedcba
+  delimiter: " '"
+  algebra:
+    - erase/^hm$/
+    - erase/^m$/
+    - erase/^n$/
+    - erase/^ng$/
+    # ü is typed as v (lv / nv); rime-ice stores lü / nü, so map back on the way in.
+    - xlit/ü/v
+    - derive/^([jqxy])v$/$1u/
+    - derive/^([nl])v$/$1ü/
+    - derive/([nl])ü$/$1v/
+    # NOTE: do NOT use `abbrev/^([a-z]).+$/$1/` here. That rule collapses every
+    # multi-letter syllable down to its initial, so "nihao" degenerates to "n" and the
+    # candidate list is single characters only (see fix_rime_rebuild/SUMMARY.md §1).
+
+translator:
+  dictionary: rime_ice
+  enable_completion: true
+  enable_sentence: true
+  enable_user_dict: true
+  initial_quality: 1.0
+  comment_format:
+    - xform/^/［/
+    - xform/$/］/
+  preedit_format:
+    - xform/([jqxy])v/$1u/
+    - xform/([nl])v/$1v/
+
+traditionalize:
+  option_name: traditionalization
+  opencc_config: s2t.json
+  tips: none
+
+punctuator:
+  full_shape:
+    ' ' : { commit: '　' }
+    ',' : { commit: '，' }
+    '.' : { commit: '。' }
+    '<' : [ 《, 〈, «, ‹ ]
+    '>' : [ 》, 〉, », › ]
+    '/' : [ ／, ÷ ]
+    '?' : { commit: '？' }
+    ';' : { commit: '；' }
+    ':' : { commit: '：' }
+    "'" : { pair: [ '‘', '’' ] }
+    '"' : { pair: [ '“', '”' ] }
+    "\\" : [ 、, ＼ ]
+    '|' : [ ·, ｜, '§', '¦' ]
+    '!' : { commit: '！' }
+  half_shape:
+    ',' : '，'
+    '.' : '。'
+    '<' : '《'
+    '>' : '》'
+    '?' : '？'
+    ';' : '；'
+    ':' : '：'
+    "'" : { pair: [ '‘', '’' ] }
+    '"' : { pair: [ '“', '”' ] }
+    "\\" : '、'
+    '!' : '！'
+    '^' : '……'
+    '(' : '（'
+    ')' : '）'
+    '_' : '——'
+
+key_binder:
+  bindings:
+    - { when: has_menu, accept: minus, send: Page_Up }
+    - { when: has_menu, accept: equal, send: Page_Down }
+
+recognizer:
+  patterns:
+    email: "^[A-Za-z][-_.0-9A-Za-z]*@.*$"
+    url: "^(www[.]|https?:|ftp[.:]|mailto:|file:).*$"
+    underscore: "^[A-Za-z]+_.*"

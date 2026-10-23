@@ -1,0 +1,1198 @@
+diff --git a/audio/supportlibs/alsa_adapter/src/vendor_capture.c b/audio/supportlibs/alsa_adapter/src/vendor_capture.c
+index 78f7bab05..2d9c3375c 100644
+--- a/audio/supportlibs/alsa_adapter/src/vendor_capture.c
++++ b/audio/supportlibs/alsa_adapter/src/vendor_capture.c
+@@ -24,6 +24,43 @@ typedef struct CaptureData {
+     long tempVolume;
+ } CaptureData;
+ 
++/*
++ * Capture volume control candidates, ordered by preference.
++ * Selected at runtime by capability probing (see CaptureProbeVolumeName) so the
++ * same library works on QEMU/hdi-generic HDA ("Capture Volume"), Intel SOF HDA
++ * (ALC256/PTL: "Dmic0 Capture Volume", or "Master Capture Volume" when present)
++ * and other ASoC cards, without hardcoding a single QEMU-specific name.
++ * numid is left as 0 so the kernel resolves the element by name (numid has
++ * priority over name in snd_ctl_find_id).
++ */
++static const char *CAPTURE_VOLUME_CANDIDATES[] = {
++    "Master Capture Volume",
++    "Capture Volume",
++    "PCM Capture Volume",
++    "Dmic0 Capture Volume",
++    "DACL Capture Volume",
++};
++
++static const char *CaptureProbeVolumeName(struct AlsaSoundCard *cardIns)
++{
++    size_t count = sizeof(CAPTURE_VOLUME_CANDIDATES) / sizeof(CAPTURE_VOLUME_CANDIDATES[0]);
++    for (size_t i = 0; i < count; i++) {
++        struct AlsaMixerCtlElement elem;
++        long volMin = 0;
++        long volMax = 0;
++        SndElementItemInit(&elem);
++        elem.numid = 0; /* 0 => 按 name 解析，避免 numid 覆盖 name */
++        elem.name = CAPTURE_VOLUME_CANDIDATES[i];
++        if (SndElementReadRange(cardIns, &elem, &volMin, &volMax) == HDF_SUCCESS) {
++            AUDIO_FUNC_LOGI("Capture volume control probed: %{public}s", elem.name);
++            return CAPTURE_VOLUME_CANDIDATES[i];
++        }
++    }
++    AUDIO_FUNC_LOGW("Capture volume control not found, fallback to %{public}s",
++        SND_ELEM_DACL_CAPTURE_VOL);
++    return SND_ELEM_DACL_CAPTURE_VOL;
++}
++
+ static int32_t CaptureInitImpl(struct AlsaCapture* captureIns)
+ {
+     CHECK_NULL_PTR_RETURN_DEFAULT(captureIns);
+@@ -31,18 +68,23 @@ static int32_t CaptureInitImpl(struct AlsaCapture* captureIns)
+         return HDF_SUCCESS;
+     }
+ 
++    struct AlsaSoundCard *cardIns = (struct AlsaSoundCard *)captureIns;
++    CHECK_NULL_PTR_RETURN_DEFAULT(cardIns);
++
+     CaptureData *priData = (CaptureData *)OsalMemCalloc(sizeof(CaptureData));
+     if (priData == NULL) {
+         AUDIO_FUNC_LOGE("Failed to allocate memory!");
+         return HDF_FAILURE;
+     }
+ 
++    const char *volName = CaptureProbeVolumeName(cardIns);
++
+     SndElementItemInit(&priData->ctrlLeftVolume);
+     SndElementItemInit(&priData->ctrlRightVolume);
+-    priData->ctrlLeftVolume.numid = SND_NUMID_DACL_CAPTURE_VOL;
+-    priData->ctrlLeftVolume.name = SND_ELEM_DACL_CAPTURE_VOL;
+-    priData->ctrlRightVolume.numid = SND_NUMID_DACR_CAPTURE_VOL;
+-    priData->ctrlRightVolume.name = SND_ELEM_DACR_CAPTURE_VOL;
++    priData->ctrlLeftVolume.numid = 0;
++    priData->ctrlLeftVolume.name = volName;
++    priData->ctrlRightVolume.numid = 0;
++    priData->ctrlRightVolume.name = volName;
+     CaptureSetPriData(captureIns, (CapturePriData)priData);
+ 
+     return HDF_SUCCESS;
+@@ -145,21 +187,40 @@ static int32_t CaptureSetMuteImpl(struct AlsaCapture *captureIns, bool muteFlag)
+     long vol = 0;
+     long setVol = 0;
+     CaptureData *priData = CaptureGetPriData(captureIns);
+-    CHECK_NULL_PTR_RETURN_DEFAULT(captureIns);
+     CHECK_NULL_PTR_RETURN_DEFAULT(priData);
++
++    /* See RenderSetMuteImpl: mute is emulated as "volume == 0", so it must
++     * only be applied on a real state transition, and an unmute must never
++     * restore a zero (which would leave capture permanently silent). */
++    if (captureIns->muteState == muteFlag) {
++        return HDF_SUCCESS;
++    }
++
+     ret = captureIns->GetVolume(captureIns, &vol);
+     if (ret != HDF_SUCCESS) {
+         AUDIO_FUNC_LOGE("GetVolume failed!");
+         return HDF_FAILURE;
+     }
+-    
++
+     if (muteFlag) {
+-        priData->tempVolume = vol;
++        if (vol > 0) {
++            priData->tempVolume = vol;
++        }
+         setVol = 0;
+     } else {
+         setVol = priData->tempVolume;
++        if (setVol <= 0) {
++            long volMin = 0;
++            long volMax = 0;
++            if (captureIns->GetVolThreshold(captureIns, &volMin, &volMax) == HDF_SUCCESS &&
++                volMax > volMin) {
++                setVol = volMin + ((volMax - volMin) * 2) / 3;
++            }
++            AUDIO_FUNC_LOGW("unmute with no saved volume, restoring %{public}ld", setVol);
++        }
+     }
+-    captureIns->SetVolume(captureIns, setVol);
++
++    ret = captureIns->SetVolume(captureIns, setVol);
+     if (ret != HDF_SUCCESS) {
+         AUDIO_FUNC_LOGE("SetVolume failed!");
+         return HDF_FAILURE;
+diff --git a/audio/supportlibs/alsa_adapter/src/vendor_render.c b/audio/supportlibs/alsa_adapter/src/vendor_render.c
+index 11f5bf804..38853dfe9 100644
+--- a/audio/supportlibs/alsa_adapter/src/vendor_render.c
++++ b/audio/supportlibs/alsa_adapter/src/vendor_render.c
+@@ -24,6 +24,48 @@ typedef struct RenderData {
+     long tempVolume;
+ } RenderData;
+ 
++/*
++ * Playback volume control candidates, ordered by preference.
++ * The real control is selected at runtime by capability probing (see
++ * RenderProbeVolumeName) instead of hardcoding a single QEMU/soc-specific
++ * name, so the same library works on:
++ *   - Intel SOF HDA (ALC256, PTL real machine): "Master Playback Volume"
++ *     (also exposes "Headphone/Speaker Playback Volume");
++ *   - QEMU/hdi-generic HDA: "Master Playback Volume";
++ *   - other ASoC/legacy cards: PCM/DACL naming.
++ * numid is left as 0 so the kernel resolves the element by name. Note the
++ * kernel (sound/core/control.c: snd_ctl_find_id) gives numid priority over
++ * name, therefore a stale/hardcoded numid would silently target the wrong
++ * control on a different card.
++ */
++static const char *RENDER_VOLUME_CANDIDATES[] = {
++    "Master Playback Volume",
++    "Headphone Playback Volume",
++    "Speaker Playback Volume",
++    "PCM Playback Volume",
++    "DACL Playback Volume",
++};
++
++static const char *RenderProbeVolumeName(struct AlsaSoundCard *cardIns)
++{
++    size_t count = sizeof(RENDER_VOLUME_CANDIDATES) / sizeof(RENDER_VOLUME_CANDIDATES[0]);
++    for (size_t i = 0; i < count; i++) {
++        struct AlsaMixerCtlElement elem;
++        long volMin = 0;
++        long volMax = 0;
++        SndElementItemInit(&elem);
++        elem.numid = 0; /* 0 => 按 name 解析，避免 numid 覆盖 name */
++        elem.name = RENDER_VOLUME_CANDIDATES[i];
++        if (SndElementReadRange(cardIns, &elem, &volMin, &volMax) == HDF_SUCCESS) {
++            AUDIO_FUNC_LOGI("Render volume control probed: %{public}s", elem.name);
++            return RENDER_VOLUME_CANDIDATES[i];
++        }
++    }
++    AUDIO_FUNC_LOGW("Render volume control not found, fallback to %{public}s",
++        SND_ELEM_DACL_PLAYBACK_VOL);
++    return SND_ELEM_DACL_PLAYBACK_VOL;
++}
++
+ static int32_t RenderInitImpl(struct AlsaRender *renderIns)
+ {
+     CHECK_NULL_PTR_RETURN_DEFAULT(renderIns);
+@@ -31,18 +73,23 @@ static int32_t RenderInitImpl(struct AlsaRender *renderIns)
+         return HDF_SUCCESS;
+     }
+ 
++    struct AlsaSoundCard *cardIns = (struct AlsaSoundCard *)renderIns;
++    CHECK_NULL_PTR_RETURN_DEFAULT(cardIns);
++
+     RenderData *priData = (RenderData *)OsalMemCalloc(sizeof(RenderData));
+     if (priData == NULL) {
+         AUDIO_FUNC_LOGE("Failed to allocate memory!");
+         return HDF_FAILURE;
+     }
+ 
++    const char *volName = RenderProbeVolumeName(cardIns);
++
+     SndElementItemInit(&priData->ctrlLeftVolume);
+     SndElementItemInit(&priData->ctrlRightVolume);
+-    priData->ctrlLeftVolume.numid = SND_NUMID_DACL_PLAYBACK_VOL;
+-    priData->ctrlLeftVolume.name = SND_ELEM_DACL_PLAYBACK_VOL;
+-    priData->ctrlRightVolume.numid = SND_NUMID_DACR_PLAYBACK_VOL;
+-    priData->ctrlRightVolume.name = SND_ELEM_DACR_PLAYBACK_VOL;
++    priData->ctrlLeftVolume.numid = 0;
++    priData->ctrlLeftVolume.name = volName;
++    priData->ctrlRightVolume.numid = 0;
++    priData->ctrlRightVolume.name = volName;
+     RenderSetPriData(renderIns, (RenderPriData)priData);
+ 
+     return HDF_SUCCESS;
+@@ -152,29 +199,56 @@ static int32_t RenderSetMuteImpl(struct AlsaRender *renderIns, bool muteFlag)
+     long vol = 0;
+     long setVol = 0;
+     RenderData *priData = RenderGetPriData(renderIns);
+-    CHECK_NULL_PTR_RETURN_DEFAULT(renderIns);
+     CHECK_NULL_PTR_RETURN_DEFAULT(priData);
+ 
++    /*
++     * Mute is emulated by driving the volume element down to its minimum, so
++     * it must only be applied on a real state transition. The audio policy
++     * re-issues SetMute(false) every time a stream/session/route changes; if
++     * that is applied unconditionally it overwrites the live volume with
++     * priData->tempVolume, which is still 0 right after the calloc in
++     * RenderInitImpl. That silently latches the codec at volume 0 and the
++     * output stays silent until the user next moves the volume slider.
++     */
++    if (renderIns->muteState == muteFlag) {
++        return HDF_SUCCESS;
++    }
++
+     ret = renderIns->GetVolume(renderIns, &vol);
+     if (ret != HDF_SUCCESS) {
+         AUDIO_FUNC_LOGE("GetVolume failed!");
+         return HDF_FAILURE;
+     }
+-    
++
+     if (muteFlag) {
+-        priData->tempVolume = vol;
++        /* Only remember a volume that actually carries sound, so an unmute
++         * can never be handed back a stale zero. */
++        if (vol > 0) {
++            priData->tempVolume = vol;
++        }
+         setVol = 0;
+     } else {
+         setVol = priData->tempVolume;
++        if (setVol <= 0) {
++            /* No usable saved volume: fall back to a clearly audible level
++             * derived from the control's own range instead of staying at 0. */
++            long volMin = 0;
++            long volMax = 0;
++            if (renderIns->GetVolThreshold(renderIns, &volMin, &volMax) == HDF_SUCCESS &&
++                volMax > volMin) {
++                setVol = volMin + ((volMax - volMin) * 2) / 3;
++            }
++            AUDIO_FUNC_LOGW("unmute with no saved volume, restoring %{public}ld", setVol);
++        }
+     }
+-    
+-    renderIns->SetVolume(renderIns, setVol);
++
++    ret = renderIns->SetVolume(renderIns, setVol);
+     if (ret != HDF_SUCCESS) {
+         AUDIO_FUNC_LOGE("SetVolume failed!");
+         return HDF_FAILURE;
+     }
+     renderIns->muteState = muteFlag;
+-    
++
+     return HDF_SUCCESS;
+ }
+ 
+diff --git a/battery/interfaces/hdi_service/src/power_supply_provider.cpp b/battery/interfaces/hdi_service/src/power_supply_provider.cpp
+index 2ea41ac60..5695700cc 100644
+--- a/battery/interfaces/hdi_service/src/power_supply_provider.cpp
++++ b/battery/interfaces/hdi_service/src/power_supply_provider.cpp
+@@ -58,6 +58,51 @@ const std::string INVALID_STRING_VALUE = "invalid";
+ const std::string BATTERY_NODE_PATH = "battery";
+ const std::string BATTERY_LESS_DTS_PATH = "/proc/device-tree/power_host_cfg/battery_less";
+ const std::string BATTERY_LESS_PRODUCT = "1";
++const std::string BATTERY_TYPE_NAME = "Battery";
++const std::string POWER_SUPPLY_TYPE_NODE = "type";
++
++// Scan /sys/class/power_supply for a real battery node (e.g. ACPI BAT0) whose
++// "type" reads "Battery". Returns the node name, or empty when none is present.
++std::string FindBatteryNodeByType()
++{
++    DIR* dir = opendir(POWER_SUPPLY_BASE_PATH.c_str());
++    if (dir == nullptr) {
++        return "";
++    }
++    std::string result;
++    struct dirent* entry = nullptr;
++    while ((entry = readdir(dir)) != nullptr) {
++        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
++            continue;
++        }
++        if (entry->d_type != DT_DIR && entry->d_type != DT_LNK) {
++            continue;
++        }
++        std::string typePath = POWER_SUPPLY_BASE_PATH + "/" + entry->d_name + "/" + POWER_SUPPLY_TYPE_NODE;
++        int32_t fd = open(typePath.c_str(), O_RDONLY);
++        if (fd < 0) {
++            continue;
++        }
++        char buf[MAX_BUFF_SIZE] = {0};
++        ssize_t size = read(fd, buf, sizeof(buf) - 1);
++        close(fd);
++        if (size <= 0) {
++            continue;
++        }
++        buf[size] = '\0';
++        std::string type(buf);
++        size_t pos = type.find_first_of("\r\n");
++        if (pos != std::string::npos) {
++            type = type.substr(0, pos);
++        }
++        if (type == BATTERY_TYPE_NAME) {
++            result = entry->d_name;
++            break;
++        }
++    }
++    closedir(dir);
++    return result;
++}
+ }
+ 
+ BatterydInfo g_batteryInfo;
+@@ -595,6 +640,13 @@ void PowerSupplyProvider::InitBatteryPath()
+             BATTERY_HILOGI(FEATURE_BATT_INFO, "system Battery path is exist");
+             return;
+         }
++        std::string realBatteryNode = FindBatteryNodeByType();
++        if (!realBatteryNode.empty()) {
++            BATTERY_HILOGI(FEATURE_BATT_INFO,
++                "find real ACPI battery node %{public}s, use /sys/class/power_supply instead of mock",
++                realBatteryNode.c_str());
++            return;
++        }
+         InitDefaultSysfs();
+     }
+     InitChargerSysfs();
+diff --git a/devhost/host/devhost.c b/devhost/host/devhost.c
+index a744825d8..e8500c8c4 100644
+--- a/devhost/host/devhost.c
++++ b/devhost/host/devhost.c
+@@ -21,6 +21,9 @@
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+ #include <getopt.h>
++#include <fcntl.h>
++#include <string.h>
++#include <unistd.h>
+ 
+ #include "securec.h"
+ #include "parameter.h"
+@@ -43,6 +46,152 @@
+ #define INVALID_PRIORITY "0"
+ #define DEVHOST_ARGUMENT 2
+ 
++/*
++ * bring-up 退出自证（fix_svcreg）：
++ *   composer_host 会反复退出，但没有 CRASH（说明不是信号崩溃）。这里用
++ *   atexit / destructor / signal handler 三类出口把 "谁让它退出、退出码/信号"
++ *   写进 /dev/kmsg 与 /data/compkmsg/compkmsg.<proc>.log（COMPKMSG:EXIT 前缀）。
++ *   全部使用 async-signal-safe 的 open/write/close，绝不在 handler 里锁/分配。
++ */
++static int g_devHostExitLogged = 0;
++
++static void DevHostItoa(int value, char *out, int outLen)
++{
++    if (out == NULL || outLen <= 1) {
++        return;
++    }
++    unsigned int u = (unsigned int)value;
++    int neg = 0;
++    if (value < 0) {
++        neg = 1;
++        u = (unsigned int)(-value);
++    }
++    char tmp[16];
++    int n = 0;
++    if (u == 0) {
++        tmp[n++] = '0';
++    }
++    while (u > 0 && n < 15) {
++        tmp[n++] = (char)('0' + (u % 10));
++        u /= 10;
++    }
++    int k = 0;
++    if (neg && k < outLen - 1) {
++        out[k++] = '-';
++    }
++    while (n > 0 && k < outLen - 1) {
++        out[k++] = tmp[--n];
++    }
++    out[k] = '\0';
++}
++
++static void DevHostWriteRaw(const char *reason, int value)
++{
++    char num[16] = {0};
++    DevHostItoa(value, num, sizeof(num));
++    char msg[128] = {0};
++    int p = 0;
++    const char *r = reason;
++    while (r != NULL && *r != '\0' && p < (int)sizeof(msg) - 16) {
++        msg[p++] = *r++;
++    }
++    const char *eq = "=";
++    while (*eq != '\0' && p < (int)sizeof(msg) - 16) {
++        msg[p++] = *eq++;
++    }
++    int q = 0;
++    while (num[q] != '\0' && p < (int)sizeof(msg) - 2) {
++        msg[p++] = num[q++];
++    }
++    msg[p] = '\0';
++
++    int kfd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
++    if (kfd >= 0) {
++        (void)write(kfd, "<3>COMPKMSG:EXIT ", 17);
++        (void)write(kfd, msg, strlen(msg));
++        (void)write(kfd, "\n", 1);
++        close(kfd);
++    }
++
++    char comm[32] = {0};
++    int cfd = open("/proc/self/comm", O_RDONLY | O_CLOEXEC);
++    if (cfd >= 0) {
++        ssize_t n = read(cfd, comm, sizeof(comm) - 1);
++        close(cfd);
++        if (n > 0) {
++            comm[n] = '\0';
++            char *nl = strchr(comm, '\n');
++            if (nl != NULL) {
++                *nl = '\0';
++            }
++        }
++    }
++    if (comm[0] == '\0') {
++        (void)strncpy(comm, "unknown", sizeof(comm) - 1);
++    }
++    char path[160] = {0};
++    const char *d = "/data/compkmsg/compkmsg.";
++    int off = 0;
++    while (*d != '\0' && off < (int)sizeof(path) - 8) {
++        path[off++] = *d++;
++    }
++    int i = 0;
++    while (comm[i] != '\0' && off < (int)sizeof(path) - 8) {
++        path[off++] = comm[i++];
++    }
++    const char *suffix = ".log";
++    i = 0;
++    while (suffix[i] != '\0' && off < (int)sizeof(path) - 1) {
++        path[off++] = suffix[i++];
++    }
++    path[off] = '\0';
++    int ffd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
++    if (ffd >= 0) {
++        (void)write(ffd, "COMPKMSG:EXIT ", 14);
++        (void)write(ffd, msg, strlen(msg));
++        (void)write(ffd, "\n", 1);
++        close(ffd);
++    }
++}
++
++static void DevHostExitAtexit(void)
++{
++    if (g_devHostExitLogged == 0) {
++        g_devHostExitLogged = 1;
++        DevHostWriteRaw("atexit_normal_return", 0);
++    }
++}
++
++static void __attribute__((unused)) DevHostExitDestructor(void)
++{
++    if (g_devHostExitLogged == 0) {
++        g_devHostExitLogged = 1;
++        DevHostWriteRaw("destructor_process_teardown", 0);
++    }
++}
++
++static void DevHostExitSignalHandler(int sig)
++{
++    g_devHostExitLogged = 1;
++    DevHostWriteRaw("fatal_signal", sig);
++    (void)signal(sig, SIG_DFL);
++    (void)raise(sig);
++}
++
++static void DevHostInstallExitDiag(void)
++{
++    (void)atexit(DevHostExitAtexit);
++    (void)signal(SIGTERM, DevHostExitSignalHandler);
++    (void)signal(SIGINT, DevHostExitSignalHandler);
++    (void)signal(SIGHUP, DevHostExitSignalHandler);
++    (void)signal(SIGQUIT, DevHostExitSignalHandler);
++    (void)signal(SIGABRT, DevHostExitSignalHandler);
++    (void)signal(SIGSEGV, DevHostExitSignalHandler);
++    (void)signal(SIGBUS, DevHostExitSignalHandler);
++    (void)signal(SIGILL, DevHostExitSignalHandler);
++    (void)signal(SIGFPE, DevHostExitSignalHandler);
++}
++
+ typedef struct {
+     int hostId;
+     const char *hostName;
+@@ -285,6 +434,7 @@ static int StartHostService(const HostConfig *config)
+     struct IDevHostService *instance = DevHostServiceNewInstance(config->hostId, config->hostName);
+     if (instance == NULL || instance->StartService == NULL) {
+         HDF_LOGE("DevHostServiceGetInstance fail");
++        DevHostWriteRaw("start_service_new_instance_fail", 0);
+         return HDF_ERR_INVALID_OBJECT;
+     }
+     HDF_LOGD("create IDevHostService of %{public}s success", config->hostName);
+@@ -294,6 +444,7 @@ static int StartHostService(const HostConfig *config)
+     int status = instance->StartService(instance);
+     if (status != HDF_SUCCESS) {
+         HDF_LOGE("Devhost StartService fail, return: %{public}d", status);
++        DevHostWriteRaw("attach_devhost_fail", status);
+         DevHostServiceFreeInstance(instance);
+         DevHostDumpDeInit();
+         return status;
+@@ -304,7 +455,9 @@ static int StartHostService(const HostConfig *config)
+     struct HdfMessageLooper *looper = &fullService->looper;
+     if ((looper != NULL) && (looper->Start != NULL)) {
+         HDF_LOGI("%{public}s start loop", config->hostName);
++        DevHostWriteRaw("looper_start_enter", 0);
+         looper->Start(looper);
++        DevHostWriteRaw("looper_start_return", 0);
+     }
+ 
+     DevHostServiceFreeInstance(instance);
+@@ -315,22 +468,28 @@ static int StartHostService(const HostConfig *config)
+ 
+ int main(int argc, char **argv)
+ {
++    DevHostInstallExitDiag();
+     if (argc < DEVHOST_MIN_INPUT_PARAM_NUM) {
+         HDF_LOGE("Devhost main parameter error, argc: %{public}d", argc);
++        DevHostWriteRaw("main_argc_too_few", argc);
+         return HDF_ERR_INVALID_PARAM;
+     }
+ 
+     HostConfig config = {0};
+     if (ParseCommandLineArgs(argc, argv, &config) != HDF_SUCCESS) {
+         HDF_LOGE("ParseCommandLineArgs(argc, argv, &config) != HDF_SUCCESS");
++        DevHostWriteRaw("main_parse_args_fail", 0);
+         return HDF_ERR_INVALID_PARAM;
+     }
+ 
+     if (InitializeHost(&config, argv) != HDF_SUCCESS) {
++        DevHostWriteRaw("main_init_host_fail", 0);
+         return HDF_ERR_INVALID_PARAM;
+     }
++    DevHostWriteRaw("main_enter", config.hostId);
+ 
+     int status = StartHostService(&config);
+     HDF_LOGI("hdf device host %{public}s %{public}d exit", config.hostName, config.hostId);
++    DevHostWriteRaw("main_return", status);
+     return status;
+ }
+diff --git a/display/composer/hdi_service/BUILD.gn b/display/composer/hdi_service/BUILD.gn
+index 58d2f12d8..5b2902ae8 100644
+--- a/display/composer/hdi_service/BUILD.gn
++++ b/display/composer/hdi_service/BUILD.gn
+@@ -92,7 +92,7 @@ ohos_shared_library("libdisplay_composer_driver_1.0") {
+   branch_protector_ret = "pac_ret"
+   defines = []
+   defines += display_defines
+-  include_dirs = []
++  include_dirs = [ "../../utils/include" ]
+   sources = [ "src/display_composer_driver.cpp" ]
+ 
+   external_deps = [
+diff --git a/display/composer/hdi_service/src/display_composer_driver.cpp b/display/composer/hdi_service/src/display_composer_driver.cpp
+index 47b27803d..5c37f05ef 100644
+--- a/display/composer/hdi_service/src/display_composer_driver.cpp
++++ b/display/composer/hdi_service/src/display_composer_driver.cpp
+@@ -13,11 +13,14 @@
+  * limitations under the License.
+  */
+ #include <pthread.h>
++#include <cerrno>
++#include <dlfcn.h>
+ #include <hdf_base.h>
+ #include <hdf_device_desc.h>
+ #include <hdf_log.h>
+ #include <hdf_sbuf_ipc.h>
+ #include "v1_5/display_composer_stub.h"
++#include "comp_kmsg.h"
+ #ifdef DISPLAY_HICOLLIE_ENABLE
+ #include "xcollie/xcollie.h"
+ #include "xcollie/xcollie_define.h"
+@@ -86,15 +89,25 @@ static int32_t DisplayComposerDriverDispatch(
+ static int HdfDisplayComposerDriverInit(struct HdfDeviceObject* deviceObject)
+ {
+     HDF_LOGI("%{public}s: enter", __func__);
++    comp_kmsg::Print("DRV", "Init enter (pid=%d, deviceObject=%p)", static_cast<int>(getpid()),
++        static_cast<void*>(deviceObject));
++    comp_kmsg::Print("DRV", "Init done ret=HDF_SUCCESS");
+     return HDF_SUCCESS;
+ }
+ 
+ static int HdfDisplayComposerDriverBind(struct HdfDeviceObject* deviceObject)
+ {
+     HDF_LOGI("%{public}s: enter", __func__);
++    comp_kmsg::Print("DRV", "Bind enter (pid=%d, deviceObject=%p)", static_cast<int>(getpid()),
++        static_cast<void*>(deviceObject));
++    if (deviceObject == nullptr) {
++        comp_kmsg::Print("DRV", "Bind FAIL: deviceObject is null");
++        return HDF_FAILURE;
++    }
+     static auto* hdfDisplayComposerHost = new (std::nothrow) HdfDisplayComposerHost;
+     if (hdfDisplayComposerHost == nullptr) {
+         HDF_LOGE("%{public}s: failed to create HdfDisplayComposerHost object", __func__);
++        comp_kmsg::Print("DRV", "Bind FAIL: new HdfDisplayComposerHost null");
+         return HDF_FAILURE;
+     }
+ 
+@@ -102,32 +115,47 @@ static int HdfDisplayComposerDriverBind(struct HdfDeviceObject* deviceObject)
+     hdfDisplayComposerHost->ioService.Open = NULL;
+     hdfDisplayComposerHost->ioService.Release = NULL;
+ 
++    comp_kmsg::Print("DRV", "Bind: calling IDisplayComposer::Get(true), expect dlopen "
++        "libdisplay_composer_service_1.5.z.so from /vendor/lib64 (or /chip_prod/lib64)");
++    errno = 0;
+     auto serviceImpl = OHOS::HDI::Display::Composer::V1_5::IDisplayComposer::Get(true);
+     if (serviceImpl == nullptr) {
++        const char *dlErr = dlerror();
+         HDF_LOGE("%{public}s: failed to get the implement of service", __func__);
++        comp_kmsg::Print("DRV", "Bind FAIL: IDisplayComposer::Get(true) returned null, errno=%d(%s) dlerror=%s",
++            errno, strerror(errno), (dlErr != nullptr) ? dlErr : "(none)");
+         delete hdfDisplayComposerHost;
+         return HDF_FAILURE;
+     }
++    comp_kmsg::Print("DRV", "Bind: IDisplayComposer::Get(true) OK (service impl created)");
+ 
++    errno = 0;
+     hdfDisplayComposerHost->stub = OHOS::HDI::ObjectCollector::GetInstance().GetOrNewObject(serviceImpl,
+         OHOS::HDI::Display::Composer::V1_5::IDisplayComposer::GetDescriptor());
+     if (hdfDisplayComposerHost->stub == nullptr) {
+         HDF_LOGE("%{public}s: failed to get stub object", __func__);
++        comp_kmsg::Print("DRV", "Bind FAIL: GetOrNewObject stub null (errno=%d %s)", errno, strerror(errno));
+         delete hdfDisplayComposerHost;
+         return HDF_FAILURE;
+     }
++    comp_kmsg::Print("DRV", "Bind: GetOrNewObject stub OK");
+ 
+     deviceObject->service = &hdfDisplayComposerHost->ioService;
+     g_stop = false;
++    comp_kmsg::Print("DRV", "Bind OK: ioService ready deviceObject->service=%p (real registration happens "
++        "AFTER Bind/Init in DeviceServiceStubPublishService -> DevSvcManagerClntAddService; watch PUB/SVCADD/DEVMGR)",
++        static_cast<void*>(deviceObject->service));
+     return HDF_SUCCESS;
+ }
+ 
+ static void HdfDisplayComposerDriverRelease(struct HdfDeviceObject* deviceObject)
+ {
+     HDF_LOGI("%{public}s: enter", __func__);
++    comp_kmsg::Print("DRV", "Release enter (deviceObject=%p)", static_cast<void*>(deviceObject));
+     pthread_rwlock_wrlock(&g_rwLock);
+     g_stop = true;
+     pthread_rwlock_unlock(&g_rwLock);
++    comp_kmsg::Print("DRV", "Release done (g_stop=1)");
+ }
+ 
+ static struct HdfDriverEntry g_displaycomposerDriverEntry = {
+diff --git a/display/composer/hdi_service/src/display_composer_service.cpp b/display/composer/hdi_service/src/display_composer_service.cpp
+index 0c82ef041..4c9b65a18 100644
+--- a/display/composer/hdi_service/src/display_composer_service.cpp
++++ b/display/composer/hdi_service/src/display_composer_service.cpp
+@@ -16,6 +16,8 @@
+ #include "display_composer_service.h"
+ 
+ #include <mutex>
++#include <ctime>
++#include <thread>
+ #include <dlfcn.h>
+ #include <hdf_base.h>
+ #include <parameters.h>
+@@ -23,6 +25,7 @@
+ #include "display_log.h"
+ #include "hdf_log.h"
+ #include "hdf_trace.h"
++#include "comp_kmsg.h"
+ #ifdef DISPLAY_COMPOSER_SERVICE_HIDUMPER
+     #include "display_dump_service.h"
+ #endif
+@@ -45,7 +48,10 @@ static std::shared_mutex g_respMapMutex;
+ 
+ extern "C" V1_5::IDisplayComposer* DisplayComposerImplGetInstance(void)
+ {
+-    return new (std::nothrow) DisplayComposerService();
++    comp_kmsg::Print("SRV", "DisplayComposerImplGetInstance enter (pid=%d)", static_cast<int>(getpid()));
++    auto *impl = new (std::nothrow) DisplayComposerService();
++    comp_kmsg::Print("SRV", "DisplayComposerImplGetInstance return impl=%p", static_cast<void*>(impl));
++    return impl;
+ }
+ 
+ DisplayComposerService::DisplayComposerService()
+@@ -60,29 +66,73 @@ DisplayComposerService::DisplayComposerService()
+     VBlankIdleCb_(nullptr),
+     hwcEventCb_(nullptr)
+ {
++    comp_kmsg::Print("SRV", "DisplayComposerService ctor enter (pid=%d)", static_cast<int>(getpid()));
++    /* fix_crash self-test: only when the kernel cmdline asks for it (default off). */
++    if (comp_kmsg::CmdlineHas("compkmsg_testcrash=1")) {
++        comp_kmsg::CrashTest0x178();
++    }
+     int32_t ret = LoadVdiSo();
+     if (ret != HDF_SUCCESS) {
+         DISPLAY_LOGE("LoadVdiSo failed");
++        comp_kmsg::Print("SRV", "ctor FAIL: LoadVdiSo ret=%d", ret);
+         return;
+     }
++    comp_kmsg::Print("SRV", "ctor step1 LoadVdiSo OK");
+ 
+     if (LoadVdiAdapter() != HDF_SUCCESS) {
+         ExitService();
+         DISPLAY_LOGE("Create DisplayComposerService failed");
++        comp_kmsg::Print("SRV", "ctor FAIL: LoadVdiAdapter (dlsym of vdi functions) failed");
+         return;
+     }
++    comp_kmsg::Print("SRV", "ctor step2 LoadVdiAdapter OK");
+ 
+     if (CreateResponser() != HDF_SUCCESS) {
+         ExitService();
+         DISPLAY_LOGE("CreateResponser failed");
++        comp_kmsg::Print("SRV", "ctor FAIL: CreateResponser failed");
+         return;
+     }
++    comp_kmsg::Print("SRV", "ctor step3 CreateResponser OK");
+ 
++    comp_kmsg::Print("SRV", "ctor step4 HidumperInit enter");
+     HidumperInit();
++    comp_kmsg::Print("SRV", "ctor step4 HidumperInit OK");
+ 
+     isSupportParallelPresenting_ = GetEnableParallel();
++    comp_kmsg::Print("SRV", "ctor step5 supportsParallel=%d", isSupportParallelPresenting_ ? 1 : 0);
++
++    comp_kmsg::Print("SRV", "ctor step6 BootstrapDisplayDiscovery begin");
+     BootstrapDisplayDiscovery();
+-    OHOS::system::SetParameter(BOOTEVENT_COMPOSER_HOST_READY.c_str(), "true");
++    comp_kmsg::Print("SRV", "ctor step6 BootstrapDisplayDiscovery returned");
++
++    /*
++     * fix_order: keep bootevent.composer_host.ready off the Bind() critical path.
++     *
++     * This ctor runs inside the driver's Bind(), i.e. BEFORE the framework registers
++     * display_composer_service into devmgr (registration happens later in
++     * DeviceServiceStubPublishService -> DevSvcManagerClntAddService). On the real PTL
++     * machine OHOS::system::SetParameter("bootevent.*") was measured to take ~15.4s on the
++     * first call (init's bootevent hook, while the system is still busy). Blocking the ctor
++     * on it would delay Bind -> registration by that long, during which render_service may
++     * already be waiting for the service. Dispatching it on a detached thread lets
++     * Bind/PublishService return immediately, so display_composer_service is registered
++     * within ~1s regardless of how slow init's bootevent relay is. The readiness signal is
++     * only informational (observability / boot-complete accounting); service availability no
++     * longer depends on it.
++     */
++    std::thread([]() {
++        struct timespec t0;
++        struct timespec t1;
++        (void)clock_gettime(CLOCK_MONOTONIC, &t0);
++        bool setRet = OHOS::system::SetParameter(BOOTEVENT_COMPOSER_HOST_READY.c_str(), "true");
++        (void)clock_gettime(CLOCK_MONOTONIC, &t1);
++        long long setMs = (t1.tv_sec - t0.tv_sec) * 1000LL + (t1.tv_nsec - t0.tv_nsec) / 1000000LL;
++        comp_kmsg::Print("SRV", "async SetParameter('%s','true') returned ret=%d took=%lldms",
++            BOOTEVENT_COMPOSER_HOST_READY.c_str(), setRet ? 1 : 0, setMs);
++    }).detach();
++    comp_kmsg::Print("SRV", "ctor OK: readiness SetParameter('%s','true') dispatched to background thread",
++        BOOTEVENT_COMPOSER_HOST_READY.c_str());
+ }
+ 
+ DisplayComposerService::~DisplayComposerService()
+@@ -111,6 +161,14 @@ int32_t DisplayComposerService::LoadVdiAdapter()
+     LoadVdiFuncPart1();
+     LoadVdiFuncPart2();
+     LoadVdiFuncPart3();
++    comp_kmsg::Print("SRV", "LoadVdiAdapter: dlsym done RegHotPlugCbNonnull=%d GetCapNonnull=%d CommitNonnull=%d",
++        (vdiAdapter_->RegHotPlugCallback != nullptr) ? 1 : 0,
++        (vdiAdapter_->GetDisplayCapability != nullptr) ? 1 : 0,
++        (vdiAdapter_->Commit != nullptr) ? 1 : 0);
++    if (vdiAdapter_->RegHotPlugCallback == nullptr || vdiAdapter_->Commit == nullptr) {
++        comp_kmsg::Print("SRV", "LoadVdiAdapter FAIL: required vdi symbols missing");
++        return HDF_FAILURE;
++    }
+     CHECK_NULLPOINTER_RETURN_VALUE(vdiAdapter_->RegHotPlugCallback, HDF_FAILURE);
+     CHECK_NULLPOINTER_RETURN_VALUE(vdiAdapter_->GetDisplayCapability, HDF_FAILURE);
+     CHECK_NULLPOINTER_RETURN_VALUE(vdiAdapter_->GetDisplaySupportedModes, HDF_FAILURE);
+@@ -310,20 +368,33 @@ int32_t DisplayComposerService::LoadVdiSo()
+     if (errStr != nullptr) {
+         DISPLAY_LOGD("composer load vdi, clear earlier dlerror: %{public}s", errStr);
+     }
++#ifdef COMPOSER_VDI_DEFAULT_LIBRARY_ENABLE
++    comp_kmsg::Print("SRV", "LoadVdiSo: dlopen vdi_impl candidates '%s' then '%s'",
++        DISPLAY_COMPOSER_VDI_DEFAULT_LIBRARY, DISPLAY_COMPOSER_VDI_LIBRARY);
++#else
++    comp_kmsg::Print("SRV", "LoadVdiSo: dlopen vdi_impl '%s'", DISPLAY_COMPOSER_VDI_LIBRARY);
++#endif
+ #ifdef COMPOSER_VDI_DEFAULT_LIBRARY_ENABLE
+     libHandle_ = dlopen(DISPLAY_COMPOSER_VDI_DEFAULT_LIBRARY, RTLD_LAZY);
+     if (libHandle_ == nullptr) {
+         DISPLAY_LOGE("composer load vendor vdi default library failed: %{public}s",
+             DISPLAY_COMPOSER_VDI_DEFAULT_LIBRARY);
++        comp_kmsg::Print("SRV", "LoadVdiSo: default '%s' failed dlerror=%s",
++            DISPLAY_COMPOSER_VDI_DEFAULT_LIBRARY, dlerror());
+ #endif // COMPOSER_VDI_DEFAULT_LIBRARY_ENABLE
+         libHandle_ = dlopen(DISPLAY_COMPOSER_VDI_LIBRARY, RTLD_LAZY);
+         DISPLAY_LOGD("composer load vendor vdi library: %{public}s", DISPLAY_COMPOSER_VDI_LIBRARY);
++        if (libHandle_ == nullptr) {
++            comp_kmsg::Print("SRV", "LoadVdiSo FAIL: dlopen '%s' failed errno=%d(%s) dlerror=%s",
++                DISPLAY_COMPOSER_VDI_LIBRARY, errno, strerror(errno), dlerror());
++        }
+ #ifdef COMPOSER_VDI_DEFAULT_LIBRARY_ENABLE
+     } else {
+         DISPLAY_LOGD("composer load vendor vdi default library: %{public}s", DISPLAY_COMPOSER_VDI_DEFAULT_LIBRARY);
+     }
+ #endif // COMPOSER_VDI_DEFAULT_LIBRARY_ENABLE
+     CHECK_NULLPOINTER_RETURN_VALUE(libHandle_, HDF_FAILURE);
++    comp_kmsg::Print("SRV", "LoadVdiSo OK: handle=%p", libHandle_);
+ 
+     return HDF_SUCCESS;
+ }
+@@ -331,11 +402,18 @@ int32_t DisplayComposerService::LoadVdiSo()
+ int32_t DisplayComposerService::CreateResponser()
+ {
+     cacheMgr_ = DeviceCacheManager::GetInstance();
+-    CHECK_NULLPOINTER_RETURN_VALUE(cacheMgr_, HDF_FAILURE);
++    if (cacheMgr_ == nullptr) {
++        comp_kmsg::Print("SRV", "CreateResponser FAIL: DeviceCacheManager null");
++        return HDF_FAILURE;
++    }
+     CHECK_NULLPOINTER_RETURN_VALUE(vdiAdapter_, HDF_FAILURE);
+     cmdResponser_ = V1_5::HdiDisplayCmdResponser::Create(vdiAdapter_, cacheMgr_);
+-    CHECK_NULLPOINTER_RETURN_VALUE(cmdResponser_, HDF_FAILURE);
++    if (cmdResponser_ == nullptr) {
++        comp_kmsg::Print("SRV", "CreateResponser FAIL: HdiDisplayCmdResponser::Create null");
++        return HDF_FAILURE;
++    }
+     DISPLAY_LOGI("%{public}s out", __func__);
++    comp_kmsg::Print("SRV", "CreateResponser OK");
+     return HDF_SUCCESS;
+ }
+ 
+@@ -345,13 +423,17 @@ void DisplayComposerService::BootstrapDisplayDiscovery()
+     CHECK_NULLPOINTER_RETURN(vdiAdapter_);
+     if (vdiAdapter_->RegHotPlugCallback == nullptr) {
+         DISPLAY_LOGE("%{public}s RegHotPlugCallback is nullptr", __func__);
++        comp_kmsg::Print("SRV", "BootstrapDisplayDiscovery FAIL: RegHotPlugCallback null");
+         return;
+     }
++    comp_kmsg::Print("SRV", "BootstrapDisplayDiscovery: call RegHotPlugCallback (triggers HdiSession/DRM discovery)");
+     int32_t ret = vdiAdapter_->RegHotPlugCallback(OnHotPlug, this);
+     if (ret != HDF_SUCCESS) {
+         DISPLAY_LOGE("%{public}s failed ret:%{public}d", __func__, ret);
++        comp_kmsg::Print("SRV", "BootstrapDisplayDiscovery FAIL: RegHotPlugCallback ret=%d", ret);
+         return;
+     }
++    comp_kmsg::Print("SRV", "BootstrapDisplayDiscovery OK ret=%d", ret);
+ #endif
+ }
+ 
+diff --git a/wlan/chip/wifi_hal/wifi_hal.cpp b/wlan/chip/wifi_hal/wifi_hal.cpp
+index b424a3585..fcbc4701a 100644
+--- a/wlan/chip/wifi_hal/wifi_hal.cpp
++++ b/wlan/chip/wifi_hal/wifi_hal.cpp
+@@ -16,6 +16,8 @@
+ #include <cerrno>
+ #include <cstdint>
+ #include <cstdio>
++#include <cstdlib>
++#include <pthread.h>
+ #include <fcntl.h>
+ #include <sys/socket.h>
+ #include <linux/rtnetlink.h>
+@@ -64,6 +66,10 @@ constexpr int32_t OFFSET_8 = 8;
+ constexpr int32_t OFFSET_16 = 16;
+ constexpr int32_t OFFSET_24 = 24;
+ constexpr int32_t MASK_CSMA = 0xFF;
++/* Default regulatory domain for the generic nl80211 path.  The "world"
++ * domain that the kernel falls back to is the most conservative one
++ * (5 GHz: 20 MHz only, DFS channels need a 60 s radar CAC). */
++constexpr const char *DEFAULT_WIFI_COUNTRY_CODE = "CN";
+ 
+ static std::mutex g_callbackMutex;
+ 
+@@ -84,6 +90,7 @@ static WifiError VendorHalCreateIface(wifiHandle handle, const char* ifname,
+     HalIfaceType ifaceType);
+ static WifiError VendorHalDeleteIface(wifiHandle handle, const char* ifname);
+ static void CheckWhetherAddIface(wifiHandle handle, const char* ifname);
++static void WifiApplyLinkTuning(wifiHandle handle);
+ WifiError IsSupportCoex(bool& isCoex);
+ static WifiError SendCmdToDriver(const char *ifaceName, int32_t commandId,
+     const std::vector<int8_t>& paramData, std::vector<int8_t>& result);
+@@ -653,6 +660,11 @@ static WifiError WifiPreInitialize(void)
+         PreInitFail(true, eventSock, cmdSock, true, true);
+         return HAL_NOT_AVAILABLE;
+     }
++    /* Apply the regulatory domain and switch the STA interface out of power
++     * save.  Without this the kernel keeps the "world" regulatory domain and
++     * the driver stays in its default power save mode, which caps the Wi-Fi
++     * throughput. */
++    WifiApplyLinkTuning(handle);
+     if ((wifiAddMemberShip(handle, "scan") < 0) || (wifiAddMemberShip(handle, "mlme")  < 0) ||
+         (wifiAddMemberShip(handle, "regulatory") < 0) || (wifiAddMemberShip(handle, "vendor") < 0)) {
+         HDF_LOGE("Add membership failed");
+@@ -1261,6 +1273,228 @@ private:
+     const char *mCountryCode;
+ };
+ 
++/* [generic nl80211 port] Ask the wireless core to apply a regulatory domain.
++ *
++ * The vendor command above (WIFI_SUBCMD_SET_COUNTRY_CODE) is only understood
++ * by the hdfwifi kernel driver.  With a stock mac80211 driver (iwlwifi on
++ * Intel PTL, ath, rtl, mac80211_hwsim, ...) it is silently dropped, so the
++ * kernel keeps the built-in "world" regulatory domain.  The world domain is
++ * the most conservative one: on 5 GHz it only allows 20 MHz channels, marks
++ * 52..144 as DFS (radar CAC of 60 s before the link comes up) and limits the
++ * transmit power.  That directly caps the achievable PHY rate / throughput.
++ *
++ * NL80211_CMD_REQ_SET_REG is the generic ("iw reg set XX") request: it only
++ * carries the ISO-3166 alpha-2 code and lets cfg80211 look the domain up in
++ * the regulatory database (needs CONFIG_CFG80211_CRDA_SUPPORT and
++ * regulatory.db).  It applies to every wiphy, so no interface index is
++ * needed. */
++class SetRegDomainCommand : public WifiCommand {
++public:
++    SetRegDomainCommand(wifiHandle handle, const char *countryCode)
++        : WifiCommand("SetRegDomainCommand", handle, 0)
++    {
++        mCountryCode = countryCode;
++    }
++    int Create() override
++    {
++        int ret = mMsg.Create(NL80211_CMD_REQ_SET_REG);
++        if (ret < 0) {
++            HDF_LOGE("Can't create reg domain message - %{public}d", ret);
++            return ret;
++        }
++        ret = mMsg.PutString(NL80211_ATTR_REG_ALPHA2, mCountryCode);
++        if (ret < 0) {
++            HDF_LOGE("Can't put reg alpha2 - %{public}d", ret);
++            return ret;
++        }
++        return HAL_SUCCESS;
++    }
++private:
++    const char *mCountryCode;
++};
++
++/* Reload the regulatory database from the firmware directory.  The kernel
++ * loads /lib/firmware/regulatory.db (firmware_class.path=/system/lib/firmware
++ * on this product) when the request is made.  The automatic load at
++ * late_initcall happens before /system is mounted, so the db has to be
++ * reloaded explicitly from user space once the system is up. */
++class ReloadRegDbCommand : public WifiCommand {
++public:
++    ReloadRegDbCommand(wifiHandle handle)
++        : WifiCommand("ReloadRegDbCommand", handle, 0)
++    {
++    }
++    int Create() override
++    {
++        int ret = mMsg.Create(NL80211_CMD_RELOAD_REGDB);
++        if (ret < 0) {
++            HDF_LOGE("Can't create reload regdb message - %{public}d", ret);
++            return ret;
++        }
++        return HAL_SUCCESS;
++    }
++};
++
++/* [generic nl80211 port] Turn off the driver's power save for the STA
++ * interface.  iwlwifi defaults to power_save=1 ("balanced"), which enables
++ * packet coalescing / long listen intervals; that adds tens of milliseconds
++ * of latency and noticeably lowers the throughput of small, latency sensitive
++ * transfers (e.g. "apk add", which opens a new connection per file). */
++class SetPowerSaveCommand : public WifiCommand {
++public:
++    SetPowerSaveCommand(wifiInterfaceHandle handle)
++        : WifiCommand("SetPowerSaveCommand", handle, 0)
++    {
++    }
++    int Create() override
++    {
++        int ret = mMsg.Create(NL80211_CMD_SET_POWER_SAVE);
++        if (ret < 0) {
++            HDF_LOGE("Can't create power save message - %{public}d", ret);
++            return ret;
++        }
++        ret = mMsg.PutU32(NL80211_ATTR_PS_STATE, NL80211_PS_DISABLED);
++        if (ret < 0) {
++            HDF_LOGE("Can't put ps state - %{public}d", ret);
++            return ret;
++        }
++        return HAL_SUCCESS;
++    }
++};
++
++static WifiError WifiSetRegDomain(wifiHandle handle, const char *country_code)
++{
++    if (!handle || !country_code || strlen(country_code) < 2) {
++        HDF_LOGE("%{public}s: invalid handle or country code", __FUNCTION__);
++        return HAL_INVALID_ARGS;
++    }
++    auto lock = ReadLockData();
++    SetRegDomainCommand command(handle, country_code);
++    int ret = command.RequestResponse();
++    if (ret < 0) {
++        HDF_LOGE("%{public}s: set reg domain %{public}s failed, ret %{public}d",
++            __FUNCTION__, country_code, ret);
++        return (WifiError)ret;
++    }
++    HDF_LOGI("%{public}s}: regulatory domain set to %{public}s", __FUNCTION__, country_code);
++    return HAL_SUCCESS;
++}
++
++static WifiError WifiDisablePowerSave(wifiInterfaceHandle handle)
++{
++    if (!handle) {
++        HDF_LOGE("%{public}s: handle is null", __FUNCTION__);
++        return HAL_INVALID_ARGS;
++    }
++    auto lock = ReadLockData();
++    SetPowerSaveCommand command(handle);
++    int ret = command.RequestResponse();
++    if (ret < 0) {
++        /* Not fatal: some drivers do not implement the command. */
++        HDF_LOGW("%{public}s}: disable power save failed, ret %{public}d", __FUNCTION__, ret);
++        return (WifiError)ret;
++    }
++    HDF_LOGI("%{public}s}: power save disabled", __FUNCTION__);
++    return HAL_SUCCESS;
++}
++
++static WifiError WifiReloadRegDb(wifiHandle handle)
++{
++    if (!handle) {
++        HDF_LOGE("%{public}s: handle is null", __FUNCTION__);
++        return HAL_INVALID_ARGS;
++    }
++    auto lock = ReadLockData();
++    ReloadRegDbCommand command(handle);
++    int ret = command.RequestResponse();
++    if (ret < 0) {
++        HDF_LOGW("%{public}s}: reload regulatory.db failed (ret %{public}d), "
++            "the kernel keeps the built-in world domain", __FUNCTION__, ret);
++        return (WifiError)ret;
++    }
++    HDF_LOGI("%{public}s}: regulatory.db reloaded", __FUNCTION__);
++    return HAL_SUCCESS;
++}
++
++/* [generic nl80211 port] Apply the regulatory domain.
++ *
++ * The kernel can only apply a country when the regulatory database
++ * (/lib/firmware/regulatory.db, i.e. /system/lib/firmware on this product) is
++ * loaded.  The automatic load of the kernel happens before /system is
++ * mounted, so it usually fails; the database therefore has to be reloaded
++ * explicitly from user space (NL80211_CMD_RELOAD_REGDB) and only then the
++ * country can be set (NL80211_CMD_REQ_SET_REG).
++ *
++ * Returns true when the country was accepted by the kernel. */
++static bool WifiApplyRegDomain(wifiHandle handle, const char *country)
++{
++    if (WifiReloadRegDb(handle) != HAL_SUCCESS) {
++        HDF_LOGW("%{public}s}: regulatory.db not available yet", __FUNCTION__);
++    }
++    if (WifiSetRegDomain(handle, country) != HAL_SUCCESS) {
++        HDF_LOGW("%{public}s}: country %{public}s not accepted yet", __FUNCTION__, country);
++        return false;
++    }
++    return true;
++}
++
++/* [generic nl80211 port] The link tuning is retried in the background: the
++ * chip HAL is initialised by hdf_devhost, which can run before the system
++ * partition (and with it the regulatory database) is available. */
++static void *WifiLinkTuningThread(void *arg)
++{
++    wifiHandle handle = (wifiHandle)arg;
++    const char *country = getenv("OHOS_WIFI_COUNTRY_CODE");
++    /* retry delays in ms */
++    static const int delays[] = {0, 3000, 10000, 30000, 60000};
++
++    if (country == nullptr || strlen(country) < 2) {
++        country = DEFAULT_WIFI_COUNTRY_CODE;
++    }
++
++    for (unsigned int i = 0; i < sizeof(delays) / sizeof(delays[0]); i++) {
++        if (delays[i] > 0) {
++            usleep((useconds_t)delays[i] * 1000);
++        }
++        if (WifiApplyRegDomain(handle, country)) {
++            HDF_LOGI("%{public}s}: regulatory domain %{public}s applied", __FUNCTION__, country);
++            return nullptr;
++        }
++    }
++    HDF_LOGE("%{public}s}: could not apply the regulatory domain, "
++        "the kernel keeps the built-in world domain", __FUNCTION__);
++    return nullptr;
++}
++
++/* [generic nl80211 port] Link level tuning that has to be done once after the
++ * driver created the netdev:
++ *   - apply a regulatory domain (the framework only pushes a country code to
++ *     the *vendor* command, which stock mac80211 drivers ignore),
++ *   - switch the STA interface out of power save.
++ * The country code can be overridden with the environment variable
++ * OHOS_WIFI_COUNTRY_CODE (2 letters, ISO-3166-1 alpha-2). */
++static void WifiApplyLinkTuning(wifiHandle handle)
++{
++    HalInfo *info = (HalInfo *)handle;
++    pthread_t tid;
++
++    if (info != nullptr) {
++        for (int i = 0; i < info->maxNumInterfaces; i++) {
++            if (info->interfaces[i] != nullptr &&
++                strncmp(info->interfaces[i]->name, "wlan0", sizeof(info->interfaces[i]->name)) == 0) {
++                WifiDisablePowerSave((wifiInterfaceHandle)info->interfaces[i]);
++                break;
++            }
++        }
++    }
++
++    if (pthread_create(&tid, nullptr, WifiLinkTuningThread, handle) == 0) {
++        pthread_detach(tid);
++    } else {
++        WifiApplyRegDomain(handle, DEFAULT_WIFI_COUNTRY_CODE);
++    }
++}
++
+ static WifiError WifiSetCountryCode(wifiInterfaceHandle handle, const char *country_code)
+ {
+     if (!handle) {
+diff --git a/wlan/client/src/netlink/netlink_cmd_adapter.c b/wlan/client/src/netlink/netlink_cmd_adapter.c
+index ce10508e1..7e6c7619f 100644
+--- a/wlan/client/src/netlink/netlink_cmd_adapter.c
++++ b/wlan/client/src/netlink/netlink_cmd_adapter.c
+@@ -1369,6 +1369,51 @@ int32_t GetAssociatedStas(const char *ifName, struct AssocStaInfoResult *result)
+     return RET_CODE_SUCCESS;
+ }
+ 
++/* [generic nl80211 port] Apply a regulatory domain through the generic
++ * mac80211 interface (the same request as "iw reg set <cc>").  The vendor
++ * command used for the hdfwifi driver is ignored by stock mac80211 drivers
++ * (iwlwifi, ath, ...), which leaves the kernel with the very conservative
++ * built-in "world" domain (5 GHz limited to 20 MHz, DFS channels need a
++ * 60 s radar CAC).  Applying the real country code unlocks the full channel
++ * / bandwidth / power set of the regulatory domain and therefore raises the
++ * achievable Wi-Fi throughput. */
++static int32_t SetRegDomain(const char *code)
++{
++    struct nl_msg *msg = NULL;
++    int32_t ret;
++
++    if (code == NULL || strlen(code) < 2) {
++        HILOG_ERROR(LOG_CORE, "%s: invalid country code", __FUNCTION__);
++        return RET_CODE_FAILURE;
++    }
++
++    msg = nlmsg_alloc();
++    if (msg == NULL) {
++        HILOG_ERROR(LOG_CORE, "%s: nlmsg alloc failed", __FUNCTION__);
++        return RET_CODE_NOMEM;
++    }
++
++    if (!genlmsg_put(msg, 0, 0, g_wifiHalInfo.familyId, 0, 0, NL80211_CMD_REQ_SET_REG, 0)) {
++        HILOG_ERROR(LOG_CORE, "%s: genlmsg_put failed", __FUNCTION__);
++        nlmsg_free(msg);
++        return RET_CODE_FAILURE;
++    }
++    if (nla_put_string(msg, NL80211_ATTR_REG_ALPHA2, code) != RET_CODE_SUCCESS) {
++        HILOG_ERROR(LOG_CORE, "%s: nla_put alpha2 failed", __FUNCTION__);
++        nlmsg_free(msg);
++        return RET_CODE_FAILURE;
++    }
++
++    ret = NetlinkSendCmdSync(msg, NULL, NULL);
++    if (ret != RET_CODE_SUCCESS) {
++        HILOG_ERROR(LOG_CORE, "%s: set reg domain failed", __FUNCTION__);
++    } else {
++        HILOG_INFO(LOG_CORE, "%s: regulatory domain set to %s", __FUNCTION__, code);
++    }
++    nlmsg_free(msg);
++    return ret;
++}
++
+ int32_t WifiSetCountryCode(const char *ifName, const char *code, uint32_t len)
+ {
+     uint32_t ifaceId = if_nametoindex(ifName);
+@@ -1381,6 +1426,9 @@ int32_t WifiSetCountryCode(const char *ifName, const char *code, uint32_t len)
+         return RET_CODE_FAILURE;
+     }
+ 
++    /* Generic mac80211 path first (works with every cfg80211 driver). */
++    SetRegDomain(code);
++
+     msg = nlmsg_alloc();
+     if (msg == NULL) {
+         HILOG_ERROR(LOG_CORE, "%s: nlmsg alloc failed", __FUNCTION__);

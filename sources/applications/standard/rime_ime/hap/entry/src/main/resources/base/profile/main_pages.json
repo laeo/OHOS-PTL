@@ -1,0 +1,6 @@
+{
+  "src": [
+    "pages/Candidate",
+    "pages/RimeSettings"
+  ]
+}

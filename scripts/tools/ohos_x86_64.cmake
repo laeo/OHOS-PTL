@@ -1,0 +1,40 @@
+# CMake toolchain: OpenHarmony (musl) x86_64, cross-compiled with OHOS SDK LLVM.
+# Used for: intel media-driver, intel vpl-gpu-rt, oneVPL dispatcher, hwdec_probe.
+set(SDK_NATIVE "/home/katax/Public/OHOS/prebuilts/ohos-sdk/linux/26.0.0/native")
+set(HWDEC_STAGE "/home/katax/Public/OHOS/out/x86_64_virt/ohos-dbg/fix_hwdec_probe/stage")
+
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER   "${SDK_NATIVE}/llvm/bin/clang")
+set(CMAKE_CXX_COMPILER "${SDK_NATIVE}/llvm/bin/clang++")
+set(CMAKE_ASM_COMPILER "${SDK_NATIVE}/llvm/bin/clang")
+set(CMAKE_C_COMPILER_TARGET   x86_64-linux-ohos)
+set(CMAKE_CXX_COMPILER_TARGET x86_64-linux-ohos)
+set(CMAKE_ASM_COMPILER_TARGET x86_64-linux-ohos)
+set(CMAKE_SYSROOT "${SDK_NATIVE}/sysroot")
+set(CMAKE_AR "${SDK_NATIVE}/llvm/bin/llvm-ar")
+set(CMAKE_RANLIB "${SDK_NATIVE}/llvm/bin/llvm-ranlib")
+set(CMAKE_STRIP "${SDK_NATIVE}/llvm/bin/llvm-strip")
+set(CMAKE_NM "${SDK_NATIVE}/llvm/bin/llvm-nm")
+set(CMAKE_OBJCOPY "${SDK_NATIVE}/llvm/bin/llvm-objcopy")
+
+set(CMAKE_FIND_ROOT_PATH "${SDK_NATIVE}/sysroot" "${HWDEC_STAGE}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
+
+list(APPEND CMAKE_LIBRARY_PATH "${HWDEC_STAGE}/usr/lib")
+list(APPEND CMAKE_INCLUDE_PATH "${HWDEC_STAGE}/usr/include")
+
+set(CMAKE_C_FLAGS_INIT   "-D__MUSL__ -fPIC -fno-addrsig -Wno-unused-command-line-argument")
+set(CMAKE_CXX_FLAGS_INIT "-D__MUSL__ -fPIC -fno-addrsig -fexceptions -std=c++14 -Wno-unused-command-line-argument")
+set(CMAKE_ASM_FLAGS_INIT "-D__MUSL__ -fPIC")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-fuse-ld=lld -Wl,--gc-sections")
+set(CMAKE_SHARED_LINKER_FLAGS_INIT "-fuse-ld=lld")
+set(CMAKE_MODULE_LINKER_FLAGS_INIT "-fuse-ld=lld")
+# static libc++ so the injected libraries do not depend on the device libc++.so ABI
+set(CMAKE_CXX_FLAGS_INIT "${CMAKE_CXX_FLAGS_INIT} -static-libstdc++")
+set(CMAKE_CXX_STANDARD_LIBRARIES_INIT "-lm")
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(BUILD_SHARED_LIBS ON)

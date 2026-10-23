@@ -1,0 +1,41 @@
+diff --git a/services/abilitymgr/src/interceptor/screen_unlock_interceptor.cpp b/services/abilitymgr/src/interceptor/screen_unlock_interceptor.cpp
+index 112df476f4..85a61f4b61 100644
+--- a/services/abilitymgr/src/interceptor/screen_unlock_interceptor.cpp
++++ b/services/abilitymgr/src/interceptor/screen_unlock_interceptor.cpp
+@@ -56,6 +56,11 @@ std::string ScreenUnlockInterceptor::GetAppIdentifier(const std::string &bundleN
+ 
+ ErrCode ScreenUnlockInterceptor::DoProcess(const AbilityInterceptorParam &param)
+ {
++    // Dev image (pc_ptl): in developer mode, allow starts even when the headless environment
++    // never reports the screen as unlocked. Secure builds keep the interception.
++    if (OHOS::system::GetBoolParameter("const.debuggable", false)) {
++        return ERR_OK;
++    }
+     AppExecFwk::AbilityInfo targetAbilityInfo;
+     if (!GetTargetAbilityInfo(param, targetAbilityInfo)) {
+         return ERR_OK;
+diff --git a/services/abilitymgr/src/utils/ability_permission_util.cpp b/services/abilitymgr/src/utils/ability_permission_util.cpp
+index 22a8aa0ee1..bec031fcda 100644
+--- a/services/abilitymgr/src/utils/ability_permission_util.cpp
++++ b/services/abilitymgr/src/utils/ability_permission_util.cpp
+@@ -25,6 +25,7 @@
+ #include "insight_intent_execute_param.h"
+ #include "ipc_skeleton.h"
+ #include "multi_instance_utils.h"
++#include "parameters.h"
+ #include "permission_constants.h"
+ #include "permission_verification.h"
+ #include "start_ability_utils.h"
+@@ -409,6 +410,12 @@ bool AbilityPermissionUtil::NeedCheckStatusBar(std::shared_ptr<AbilityRecord> ab
+ 
+ bool AbilityPermissionUtil::CheckStartUIAbilityByUserLockStatus(const std::string &bundleName)
+ {
++    // Dev image (pc_ptl): when running in developer mode (const.debuggable=1) the headless
++    // environment never reaches USER_UNLOCKED via the SceneBoard keyguard, which blocks every
++    // third-party UIAbility start. Bypass only in developer mode; secure builds keep the gate.
++    if (system::GetBoolParameter("const.debuggable", false)) {
++        return true;
++    }
+     if (bundleName.empty()) {
+         TAG_LOGW(AAFwkTag::ABILITYMGR, "empty name");
+         return true;

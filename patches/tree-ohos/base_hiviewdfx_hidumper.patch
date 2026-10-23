@@ -1,0 +1,33 @@
+diff --git a/services/native/src/dump_manager_service.cpp b/services/native/src/dump_manager_service.cpp
+index 022f11c..b158048 100644
+--- a/services/native/src/dump_manager_service.cpp
++++ b/services/native/src/dump_manager_service.cpp
+@@ -46,6 +46,8 @@ namespace OHOS {
+ namespace HiviewDFX {
+ namespace {
+ const std::string DUMPMGR_SERVICE_NAME = "HiDumperManagerService";
++// fix_hidumper: root(uid 0) 调用方在 ATK 判定失败时也允许 dump（调试链路用）
++constexpr int32_t DUMP_ROOT_UID = 0;
+ auto dumpManagerService = DumpDelayedSpSingleton<DumpManagerService>::GetInstance();
+ const bool G_REGISTER_RESULT = SystemAbility::MakeAndRegisterAbility(dumpManagerService.GetRefPtr());
+ static const int32_t STOP_WAIT = 3;
+@@ -203,6 +205,19 @@ bool DumpManagerService::HasDumpPermission() const
+     uint32_t callingTokenID = IPCSkeleton::GetCallingTokenID();
+     int res = Security::AccessToken::AccessTokenKit::VerifyAccessToken(callingTokenID, "ohos.permission.DUMP");
+     if (res != Security::AccessToken::PermissionState::PERMISSION_GRANTED) {
++        // fix_hidumper: ATK 判定失败时，对 root 调用方放行。
++        //
++        // 原因：native token 的 apl 与 ohos.permission.DUMP 的 availableLevel
++        // (system_core) 不匹配时，accesstoken_info_manager.cpp 的
++        // GetNativePermissionList() 会把该权限整条丢弃（除非它在 nativeAcls 里），
++        // 结果 root（console shell / ohos-diag 诊断服务）调用 hidumper 也只能拿到
++        // "request error"。root 本身已经拥有设备的全部权限，这里只是让调试链路可用。
++        if (IPCSkeleton::GetCallingUid() == DUMP_ROOT_UID) {
++            DUMPER_HILOGI(MODULE_SERVICE,
++                "Allow root caller to dump, tokenId=%{public}u, uid=%{public}d", callingTokenID,
++                IPCSkeleton::GetCallingUid());
++            return true;
++        }
+         DUMPER_HILOGI(MODULE_SERVICE, "No dump permission, please check!");
+         return false;
+     }

@@ -1,0 +1,31 @@
+diff --git a/porting/linux/user/src/hook/malloc_common.c b/porting/linux/user/src/hook/malloc_common.c
+index d720c85c1..ea139edab 100644
+--- a/porting/linux/user/src/hook/malloc_common.c
++++ b/porting/linux/user/src/hook/malloc_common.c
+@@ -122,7 +122,8 @@ int munmap(void* addr, size_t length)
+ 
+ void* calloc(size_t m, size_t n)
+ {
+-	if ((m <= (UINT32_MAX / n)) && ((m * n) >= MALLOC_REPORT_LIMIT)) {
++	/* Guard n == 0: UINT32_MAX / n below would raise SIGFPE for calloc(m, 0). */
++	if (n != 0 && (m <= (UINT32_MAX / n)) && ((m * n) >= MALLOC_REPORT_LIMIT)) {
+ 		raise(MUSL_SIGNAL_LEAK_STACK);
+ 	}
+ 	volatile const struct MallocDispatchType* dispatch_table = get_current_dispatch_table();
+diff --git a/src/hook/linux/malloc_common.c b/src/hook/linux/malloc_common.c
+index 611902779..d1338bae4 100644
+--- a/src/hook/linux/malloc_common.c
++++ b/src/hook/linux/malloc_common.c
+@@ -161,7 +161,11 @@ int munmap(void* addr, size_t length)
+ 
+ void* calloc(size_t m, size_t n)
+ {
+-	if ((m <= (UINT32_MAX / n)) && ((m * n) >= MALLOC_REPORT_LIMIT)) {
++	/* Guard n == 0: the UINT32_MAX / n below would raise SIGFPE (integer
++	 * divide-by-zero) for the legal call calloc(m, 0).  With n == 0 the
++	 * product m * n is 0 and can never reach MALLOC_REPORT_LIMIT, so the
++	 * whole large-allocation report branch must simply be skipped. */
++	if (n != 0 && (m <= (UINT32_MAX / n)) && ((m * n) >= MALLOC_REPORT_LIMIT)) {
+ #ifdef OHOS_FDTRACK_HOOK_ENABLE
+ 		if (check_before_memory_allocate(prevTime, KICK_ALLOCATE_MEMORY)) {
+ 			gettimeofday(&prevTime, NULL);

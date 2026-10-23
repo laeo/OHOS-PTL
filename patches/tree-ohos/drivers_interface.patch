@@ -1,0 +1,124 @@
+diff --git a/display/composer/v1_5/BUILD.gn b/display/composer/v1_5/BUILD.gn
+index 11bc5e64..ed50a8ae 100644
+--- a/display/composer/v1_5/BUILD.gn
++++ b/display/composer/v1_5/BUILD.gn
+@@ -51,6 +51,7 @@ config("libdisplay_composer_hdi_impl_config") {
+   include_dirs = [
+     "../",
+     "../hdifd_parcelable",
++    "../../../../peripheral/display/utils/include",
+   ]
+ }
+ 
+diff --git a/display/composer/v1_5/display_command/display_cmd_requester.h b/display/composer/v1_5/display_command/display_cmd_requester.h
+index 4e5f7e9f..d2a7b90c 100644
+--- a/display/composer/v1_5/display_command/display_cmd_requester.h
++++ b/display/composer/v1_5/display_command/display_cmd_requester.h
+@@ -20,6 +20,7 @@
+ #include "v1_5/display_command/display_cmd_utils.h"
+ #include "v1_5/display_composer_type.h"
+ #include "v1_5/idisplay_composer.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+@@ -40,7 +41,10 @@ public:
+         auto requester = std::make_unique<DisplayCmdRequester>(hdi);
+         DISPLAY_CHK_RETURN(requester == nullptr, nullptr,
+             HDF_LOGE("%{public}s: CmdRequester is nullptr", __func__));
++        comp_kmsg::Print("CLIENT", "CmdReq::Create: before Init hdi=%p devId=%u",
++            static_cast<void *>(hdi.GetRefPtr()), devId);
+         auto ret = requester->Init(CmdUtils::INIT_ELEMENT_COUNT, devId);
++        comp_kmsg::Print("CLIENT", "CmdReq::Create: after Init ret=%d", ret);
+         DISPLAY_CHK_RETURN(ret != HDF_SUCCESS, nullptr,
+             HDF_LOGE("%{public}s: DisplayCmdRequester init failed", __func__));
+         return requester;
+diff --git a/display/composer/v1_5/hdi_impl/display_composer_hdi_impl.h b/display/composer/v1_5/hdi_impl/display_composer_hdi_impl.h
+index 26b72f36..e495c185 100644
+--- a/display/composer/v1_5/hdi_impl/display_composer_hdi_impl.h
++++ b/display/composer/v1_5/hdi_impl/display_composer_hdi_impl.h
+@@ -22,6 +22,7 @@
+ #include "v1_5/display_composer_type.h"
+ #include "v1_5/idisplay_composer.h"
+ #include "v1_5/include/idisplay_composer_interface.h"
++#include "comp_kmsg.h"
+ #include <cinttypes>
+ 
+ #undef LOG_TAG
+@@ -45,19 +46,51 @@ public:
+         sptr<CompHdi> hdi;
+         std::shared_ptr<CmdReq> req = nullptr;
+         HDF_LOGI("%{public}s: hdi v1_5 start", __func__);
++        comp_kmsg::Print("CLIENT", "HdiDisplayComposer::Create enter (render_service waiting for service "
++            "'display_composer_service')");
++        /*
++         * fix_order: keep the upstream unbounded wait. The boot order now guarantees
++         * hdf_devmgr -> composer_host -> render_service (see init.pc_ptl.cfg + hdf_devhost.cfg
++         * start-mode), so this loop is expected to find the service immediately; it exists only
++         * to tolerate composer_host's own (bounded) DRM discovery startup. Only add a periodic
++         * diagnostic - no give-up, matching the upstream "while (Get() == nullptr) usleep()".
++         */
++        int waitTimes = 0;
++        comp_kmsg::Print("CLIENT", "Create: step0 before CompHdi::Get (needSMQ=%d)", needSMQ ? 1 : 0);
+         while ((hdi = CompHdi::Get()) == nullptr) {
+             // Waiting for display composer service ready
++            ++waitTimes;
++            if (waitTimes == 1 || (waitTimes % 500) == 0) {
++                comp_kmsg::Print("CLIENT", "service 'display_composer_service' NOT available yet, "
++                    "waitTimes=%d", waitTimes);
++            }
+             usleep(WAIT_TIME_INTERVAL);
+         }
++        if (hdi == nullptr) {
++            /* fix_crash: never dereference a null composer; fail cleanly instead of SIGSEGV. */
++            comp_kmsg::Print("CLIENT", "Create: FAIL hdi is null after wait loop, return nullptr");
++            return nullptr;
++        }
++        comp_kmsg::Print("CLIENT", "Create: step1 got service hdi=%p after %d retry(ies)",
++            static_cast<void *>(hdi.GetRefPtr()), waitTimes);
++        comp_kmsg::Print("CLIENT", "HdiDisplayComposer::Create got service after %d retry(ies)", waitTimes);
+         HDF_LOGI("%{public}s: hdi v1_5 end", __func__);
+         if (needSMQ) {
++            comp_kmsg::Print("CLIENT", "Create: step2 CmdReq::Create enter hdi=%p",
++                static_cast<void *>(hdi.GetRefPtr()));
+             req = CmdReq::Create(hdi);
++            comp_kmsg::Print("CLIENT", "Create: step3 CmdReq::Create returned req=%p",
++                static_cast<void *>(req.get()));
+             if (req == nullptr) {
+                 HDF_LOGE("%{public}s: Create DisplayCmdRequester failed %{public}d", __func__, __LINE__);
+                 return nullptr;
+             }
+         }
+-        return new DisplayComposerHdiImpl(hdi, req);
++        comp_kmsg::Print("CLIENT", "Create: step4 new DisplayComposerHdiImpl enter hdi=%p req=%p",
++            static_cast<void *>(hdi.GetRefPtr()), static_cast<void *>(req.get()));
++        DisplayComposerHdiImpl *impl = new DisplayComposerHdiImpl(hdi, req);
++        comp_kmsg::Print("CLIENT", "Create: step5 new impl=%p", static_cast<void *>(impl));
++        return impl;
+     }
+ 
+     DisplayComposerHdiImpl(sptr<CompHdi> hdi, std::shared_ptr<CmdReq> req)
+diff --git a/tools/hc-gen/src/option.h b/tools/hc-gen/src/option.h
+index 671e6b42..a355d136 100644
+--- a/tools/hc-gen/src/option.h
++++ b/tools/hc-gen/src/option.h
+@@ -16,6 +16,7 @@
+ #ifndef HC_GEN_OPTION_H
+ #define HC_GEN_OPTION_H
+ 
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ 
+diff --git a/tools/hc-gen/src/token.h b/tools/hc-gen/src/token.h
+index 6fdef013..a2b633b0 100644
+--- a/tools/hc-gen/src/token.h
++++ b/tools/hc-gen/src/token.h
+@@ -16,6 +16,7 @@
+ #ifndef HC_GEN_TOKEN_H
+ #define HC_GEN_TOKEN_H
+ 
++#include <cstdint>
+ #include <memory>
+ #include <ostream>
+ #include <string>

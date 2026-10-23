@@ -1,0 +1,77 @@
+diff --git a/common/src/main/ets/framework/common/PageRouter.ets b/common/src/main/ets/framework/common/PageRouter.ets
+index bcef587a..1a5722c1 100644
+--- a/common/src/main/ets/framework/common/PageRouter.ets
++++ b/common/src/main/ets/framework/common/PageRouter.ets
+@@ -125,7 +125,15 @@ export class PageRouter {
+     // 动态导入要跳转的页面信息，并处理准备工作
+     if (!PageLoader.getPageContext(page.url).isPresent()) {
+       LogHelper.info(TAG, 'ready to import page: ' + page.url);
+-      await router.loader(page.url);
++      try {
++        await router.loader(page.url);
++      } catch (err) {
++        // A missing / failing page module must not crash the Settings app:
++        // a rejected dynamic import previously produced an unhandled promise
++        // rejection (jscrash on some runtimes). Log and bail out gracefully.
++        LogHelper.error(TAG, `failed to import page: ${page.url}, err: ${JSON.stringify(err)}`);
++        return;
++      }
+       LogHelper.info(TAG, 'finish to import page: ' + page.url);
+     }
+ 
+diff --git a/product/phone/build-profile.json5 b/product/phone/build-profile.json5
+index 2cb17acf..d5be4648 100644
+--- a/product/phone/build-profile.json5
++++ b/product/phone/build-profile.json5
+@@ -58,6 +58,8 @@
+           "./src/main/ets/Setting/Keyboard/KeyboardPage.ets",
+           "./src/main/ets/Setting/Keyboard/KeyBoardFirmwareUpgrade.ets",
+           "./src/main/ets/Setting/Keyboard/KeyBoardInformationSettings.ets",
++          "./src/main/ets/Setting/Mouse/MousePage.ets",
++          "./src/main/ets/Setting/Touchpad/TouchpadPage.ets",
+           "./src/main/ets/Setting/Print/PrintPage.ets",
+           "./src/main/ets/Setting/Privacy/PrivacyPage.ets",
+           "./src/main/ets/Setting/Storage/StoragePage.ets",
+diff --git a/product/phone/src/main/ets/Setting/Home/HomePage.ets b/product/phone/src/main/ets/Setting/Home/HomePage.ets
+index 0624489a..08b4b54a 100644
+--- a/product/phone/src/main/ets/Setting/Home/HomePage.ets
++++ b/product/phone/src/main/ets/Setting/Home/HomePage.ets
+@@ -127,9 +127,9 @@ function homePage(): SettingPageModel {
+         type: GroupType.GROUP_TYPE_STANDARD,
+         items: [
+           // HomePageModelUtil.getHiWriteItem(),
+-          // HomePageModelUtil.getMouseItem(),
+-          // HomePageModelUtil.getKeyboardItem(),
+-          // HomePageModelUtil.getPadTouchItem(),
++          HomePageModelUtil.getMouseItem(),
++          HomePageModelUtil.getKeyboardItem(),
++          HomePageModelUtil.getPadTouchItem(),
+           HomePageModelUtil.getPrinterItem(),
+         ]
+       },
+diff --git a/product/phone/src/main/ets/Setting/Home/utils/HomePageModelUtil.ets b/product/phone/src/main/ets/Setting/Home/utils/HomePageModelUtil.ets
+index afa476a4..7e9ee469 100644
+--- a/product/phone/src/main/ets/Setting/Home/utils/HomePageModelUtil.ets
++++ b/product/phone/src/main/ets/Setting/Home/utils/HomePageModelUtil.ets
+@@ -237,7 +237,7 @@ export class HomePageModelUtil {
+         isSymbolIcon: true,
+         destination: NavEntryKey.PAD_TOUCHPAD_SETTINGS_ENTRY,
+       },
+-      needHide: HomePageMenuManager.getInstance().isTouchpadNotSupport
++      needHide: DeviceUtil.isDevicePhone
+     };
+   }
+ 
+diff --git a/product/phone/src/main/ets/Setting/Touchpad/view/TouchpadPointerSpeedComponent.ets b/product/phone/src/main/ets/Setting/Touchpad/view/TouchpadPointerSpeedComponent.ets
+index 3fa266aa..59ad21e9 100644
+--- a/product/phone/src/main/ets/Setting/Touchpad/view/TouchpadPointerSpeedComponent.ets
++++ b/product/phone/src/main/ets/Setting/Touchpad/view/TouchpadPointerSpeedComponent.ets
+@@ -25,6 +25,8 @@ export struct TouchpadPointerSpeedComponent {
+   aboutToAppear(): void {
+     LogUtil.info(`${this.tag} aboutToAppear`);
+     this.sliderValue = this.controller.getPointerSpeed();
++    // Refresh the authoritative value from MMI asynchronously (never blocks UI).
++    this.controller.syncPointerSpeed();
+   }
+ 
+   aboutToDisappear(): void {

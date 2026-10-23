@@ -1,0 +1,330 @@
+diff --git a/wifi/frameworks/native/src/wifi_device_impl.cpp b/wifi/frameworks/native/src/wifi_device_impl.cpp
+index ba2dda1cf..730de9733 100644
+--- a/wifi/frameworks/native/src/wifi_device_impl.cpp
++++ b/wifi/frameworks/native/src/wifi_device_impl.cpp
+@@ -66,6 +66,8 @@ bool WifiDeviceImpl::Init(int systemAbilityId, int instId)
+ #else
+     systemAbilityId_ = systemAbilityId;
+     instId_ = instId;
++    /* 非阻塞预热 WiFi SA：加载在后台进行，避免后续同步 API 首次调用时被长时间阻塞。 */
++    WifiSaLoadManager::GetInstance().PreloadWifiSa(systemAbilityId_);
+     return true;
+ #endif
+ }
+diff --git a/wifi/frameworks/native/src/wifi_hotspot_impl.cpp b/wifi/frameworks/native/src/wifi_hotspot_impl.cpp
+index 0ba06eb7a..1066ab5ac 100644
+--- a/wifi/frameworks/native/src/wifi_hotspot_impl.cpp
++++ b/wifi/frameworks/native/src/wifi_hotspot_impl.cpp
+@@ -115,6 +115,8 @@ bool WifiHotspotImpl::Init(int systemAbilityId, int id)
+ {
+     systemAbilityId_ = systemAbilityId;
+     instId = id;
++    /* 非阻塞预热 WiFi Hotspot SA。 */
++    WifiSaLoadManager::GetInstance().PreloadWifiSa(systemAbilityId_);
+     return true;
+ }
+ 
+diff --git a/wifi/frameworks/native/src/wifi_p2p_impl.cpp b/wifi/frameworks/native/src/wifi_p2p_impl.cpp
+index 88def2d9d..bb12cbd79 100644
+--- a/wifi/frameworks/native/src/wifi_p2p_impl.cpp
++++ b/wifi/frameworks/native/src/wifi_p2p_impl.cpp
+@@ -40,6 +40,8 @@ WifiP2pImpl::~WifiP2pImpl()
+ bool WifiP2pImpl::Init(int systemAbilityId)
+ {
+     systemAbilityId_ = systemAbilityId;
++    /* 非阻塞预热 WiFi P2P SA。 */
++    WifiSaLoadManager::GetInstance().PreloadWifiSa(systemAbilityId_);
+     return true;
+ }
+ 
+diff --git a/wifi/frameworks/native/src/wifi_scan_impl.cpp b/wifi/frameworks/native/src/wifi_scan_impl.cpp
+index c69208197..1300893f4 100644
+--- a/wifi/frameworks/native/src/wifi_scan_impl.cpp
++++ b/wifi/frameworks/native/src/wifi_scan_impl.cpp
+@@ -142,6 +142,8 @@ bool WifiScanImpl::Init(int systemAbilityId, int instId)
+ #else
+     systemAbilityId_ = systemAbilityId;
+     instId_ = instId;
++    /* 非阻塞预热 WiFi Scan SA。 */
++    WifiSaLoadManager::GetInstance().PreloadWifiSa(systemAbilityId_);
+     return true;
+ #endif
+ }
+diff --git a/wifi/utils/inc/wifi_sa_manager.h b/wifi/utils/inc/wifi_sa_manager.h
+index 7620cdc0c..94b262277 100644
+--- a/wifi/utils/inc/wifi_sa_manager.h
++++ b/wifi/utils/inc/wifi_sa_manager.h
+@@ -16,7 +16,11 @@
+ #ifndef OHOS_WIFI_SA_MANAGER_H
+ #define OHOS_WIFI_SA_MANAGER_H
+ 
+-#include <condition_variable>
++#include <chrono>
++#include <map>
++#include <mutex>
++#include <unordered_set>
++
+ #include "iremote_object.h"
+ 
+ #include "system_ability_load_callback_stub.h"
+@@ -27,6 +31,18 @@ namespace Wifi {
+ constexpr uint32_t TIMEOUT_UNLOAD_WIFI_SA = 5 * 60 * 1000;
+ constexpr uint32_t TIMEOUT_STOP_SATELLITE = 2 * 60 * 1000;
+ 
++/*
++ * 单次同步等待上限（ms）。
++ * 原实现为 2500ms：一旦 WiFi SA 尚未加载，调用线程（可能是应用主线程）会被
++ * 阻塞到最长 2.5s，期间无法读取自己的 MMI 输入事件 socket，导致输入事件积压
++ * 直至 ANR 冻结（APPLICATION_BLOCK_INPUT）。
++ * 这里缩短为 500ms，并配合“已加载缓存 + 后台预加载 + 并发去重”，
++ * 使主线程不会被长时间卡住；SA 仍在后台继续加载，后续调用即可命中缓存。
++ */
++constexpr int32_t WIFI_LOADSA_TIMEOUT_MS = 500;
++/* 两次主动触发加载之间的冷却（ms），避免重复请求在 samgr 侧堆积。 */
++constexpr int64_t WIFI_LOADSA_RETRY_COOLDOWN_MS = 3000;
++
+ class WifiSaLoadCallback : public SystemAbilityLoadCallbackStub {
+ public:
+     void OnLoadSystemAbilitySuccess(int32_t systemAbilityId, const sptr<IRemoteObject>& remoteObject) override;
+@@ -41,16 +57,26 @@ public:
+     static WifiSaLoadManager& GetInstance();
+     ErrCode LoadWifiSa(int32_t systemAbilityId);
+     ErrCode UnloadWifiSa(int32_t systemAbilityId);
+-    void LoadSystemAbilitySuccess();
+-    void LoadSystemAbilityFail();
++    /*
++     * 非阻塞地触发一次 SA 加载（不等待结果），用于在客户端库初始化时把
++     * WiFi SA 预热，让后续同步调用直接命中缓存，避免首次调用被阻塞。
++     */
++    void PreloadWifiSa(int32_t systemAbilityId);
++    void OnLoadSuccess(int32_t systemAbilityId);
++    void OnLoadFail(int32_t systemAbilityId);
+ private:
+-    void InitLoadState();
+-    ErrCode WaitLoadStateChange(int32_t systemAbilityId);
++    ErrCode StartLoadLocked(int32_t systemAbilityId);
++    bool IsCached(int32_t systemAbilityId);
++    void Cache(int32_t systemAbilityId);
+ 
+-    std::condition_variable locatorCon_;
+-    std::mutex locatorMutex_;
+-    bool state_ = false;
++    std::mutex mutex_;
++    /* 已确认加载成功（或已在 samgr 可查）的 SA，命中后直接返回，不再产生 IPC 等待 */
++    std::unordered_set<int32_t> loadedSet_;
++    /* 正在加载中的 SA（去重，避免多线程各自等待） */
++    std::unordered_set<int32_t> loadingSet_;
++    /* 每个 SA 上次触发加载的时间点，用于重试冷却 */
++    std::map<int32_t, std::chrono::steady_clock::time_point> lastTriggerMap_;
+ };
+ }  // namespace Wifi
+ }  // namespace OHOS
+-#endif // OHOS_WIFI_SA_MANAGER_H
+\ No newline at end of file
++#endif // OHOS_WIFI_SA_MANAGER_H
+diff --git a/wifi/utils/src/wifi_sa_manager.cpp b/wifi/utils/src/wifi_sa_manager.cpp
+index 1a7644f5e..89b600797 100644
+--- a/wifi/utils/src/wifi_sa_manager.cpp
++++ b/wifi/utils/src/wifi_sa_manager.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include "wifi_sa_manager.h"
+ 
++#include <unistd.h>
++
+ #include "iremote_broker.h"
+ #include "iremote_object.h"
+ #include "iservice_registry.h"
+@@ -24,7 +26,8 @@ DEFINE_WIFILOG_LABEL("WifiSaLoadManager");
+ 
+ namespace OHOS {
+ namespace Wifi {
+-static constexpr int32_t WIFI_LOADSA_TIMEOUT_MS = 2500;
++/* 轮询检查 SA 是否就绪的步长（µs）。 */
++static constexpr int32_t WIFI_LOADSA_POLL_STEP_US = 50 * 1000;
+ 
+ WifiSaLoadManager& WifiSaLoadManager::GetInstance()
+ {
+@@ -32,20 +35,39 @@ WifiSaLoadManager& WifiSaLoadManager::GetInstance()
+     return * instance;
+ }
+ 
+-ErrCode WifiSaLoadManager::LoadWifiSa(int32_t systemAbilityId)
++bool WifiSaLoadManager::IsCached(int32_t systemAbilityId)
+ {
+-    WIFI_LOGD("%{public}s enter, systemAbilityId = [%{public}d] loading", __func__, systemAbilityId);
++    std::lock_guard<std::mutex> lock(mutex_);
++    return loadedSet_.find(systemAbilityId) != loadedSet_.end();
++}
++
++void WifiSaLoadManager::Cache(int32_t systemAbilityId)
++{
++    std::lock_guard<std::mutex> lock(mutex_);
++    loadedSet_.insert(systemAbilityId);
++    loadingSet_.erase(systemAbilityId);
++    lastTriggerMap_.erase(systemAbilityId);
++}
++
++ErrCode WifiSaLoadManager::StartLoadLocked(int32_t systemAbilityId)
++{
++    /* 调用者需持有 mutex_。 */
++    auto now = std::chrono::steady_clock::now();
++    auto it = lastTriggerMap_.find(systemAbilityId);
++    if (it != lastTriggerMap_.end()) {
++        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second).count();
++        if (elapsed < WIFI_LOADSA_RETRY_COOLDOWN_MS) {
++            /* 近期已触发过加载（可能正在加载），不重复请求，避免 samgr 回调堆积。 */
++            return WIFI_OPT_SUCCESS;
++        }
++    }
++
+     sptr<ISystemAbilityManager> samgr =
+         SystemAbilityManagerClient::GetInstance().GetSystemAbilityManager();
+     if (samgr == nullptr) {
+         WIFI_LOGE("%{public}s: get system ability manager failed!", __func__);
+         return WIFI_OPT_FAILED;
+     }
+-    auto object = samgr->CheckSystemAbility(systemAbilityId);
+-    if (object != nullptr) {
+-        return WIFI_OPT_SUCCESS;
+-    }
+-    InitLoadState();
+     sptr<WifiSaLoadCallback> loadCallback = new (std::nothrow) WifiSaLoadCallback();
+     if (loadCallback == nullptr) {
+         WIFI_LOGE("%{public}s: wifi sa load callback failed!", __func__);
+@@ -57,31 +79,81 @@ ErrCode WifiSaLoadManager::LoadWifiSa(int32_t systemAbilityId)
+             __func__, systemAbilityId, ret);
+         return WIFI_OPT_FAILED;
+     }
+-    return WaitLoadStateChange(systemAbilityId);
++    loadingSet_.insert(systemAbilityId);
++    lastTriggerMap_[systemAbilityId] = now;
++    return WIFI_OPT_SUCCESS;
+ }
+ 
+-void WifiSaLoadManager::InitLoadState()
++ErrCode WifiSaLoadManager::LoadWifiSa(int32_t systemAbilityId)
+ {
+-    std::unique_lock<std::mutex> lock(locatorMutex_);
+-    state_ = false;
++    WIFI_LOGD("%{public}s enter, systemAbilityId = [%{public}d] loading", __func__, systemAbilityId);
++
++    /* 已加载过：直接命中缓存，不再产生任何 IPC / 等待。 */
++    if (IsCached(systemAbilityId)) {
++        return WIFI_OPT_SUCCESS;
++    }
++
++    sptr<ISystemAbilityManager> samgr =
++        SystemAbilityManagerClient::GetInstance().GetSystemAbilityManager();
++    if (samgr == nullptr) {
++        WIFI_LOGE("%{public}s: get system ability manager failed!", __func__);
++        return WIFI_OPT_FAILED;
++    }
++    if (samgr->CheckSystemAbility(systemAbilityId) != nullptr) {
++        Cache(systemAbilityId);
++        return WIFI_OPT_SUCCESS;
++    }
++
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        if (StartLoadLocked(systemAbilityId) != WIFI_OPT_SUCCESS) {
++            return WIFI_OPT_FAILED;
++        }
++    }
++
++    /*
++     * 有界轮询等待：一旦 SA 就绪立即返回，最长 WIFI_LOADSA_TIMEOUT_MS。
++     * 超时也不再继续阻塞调用线程（后台回调仍会完成加载并写入缓存），
++     * 从而避免应用主线程被长时间挂住导致输入事件积压 / ANR。
++     */
++    int32_t loops = WIFI_LOADSA_TIMEOUT_MS * 1000 / WIFI_LOADSA_POLL_STEP_US;
++    for (int32_t i = 0; i < loops; ++i) {
++        if (samgr->CheckSystemAbility(systemAbilityId) != nullptr) {
++            Cache(systemAbilityId);
++            return WIFI_OPT_SUCCESS;
++        }
++        usleep(WIFI_LOADSA_POLL_STEP_US);
++    }
++    WIFI_LOGW("locator sa [%{public}d] not ready within %{public}d ms, return without blocking further.",
++        systemAbilityId, WIFI_LOADSA_TIMEOUT_MS);
++    return WIFI_OPT_FAILED;
+ }
+ 
+-ErrCode WifiSaLoadManager::WaitLoadStateChange(int32_t systemAbilityId)
++void WifiSaLoadManager::PreloadWifiSa(int32_t systemAbilityId)
+ {
+-    std::unique_lock<std::mutex> lock(locatorMutex_);
+-    auto wait = locatorCon_.wait_for(lock, std::chrono::milliseconds(WIFI_LOADSA_TIMEOUT_MS), [this] {
+-        return state_ == true;
+-    });
+-    if (!wait) {
+-        WIFI_LOGE("locator sa [%{public}d] start time out.", systemAbilityId);
+-        return WIFI_OPT_FAILED;
++    sptr<ISystemAbilityManager> samgr =
++        SystemAbilityManagerClient::GetInstance().GetSystemAbilityManager();
++    if (samgr == nullptr) {
++        return;
+     }
+-    return WIFI_OPT_SUCCESS;
++    if (samgr->CheckSystemAbility(systemAbilityId) != nullptr) {
++        Cache(systemAbilityId);
++        return;
++    }
++    std::lock_guard<std::mutex> lock(mutex_);
++    /* 异步触发即可，不等待结果：真正的加载完成后由回调写入缓存。 */
++    StartLoadLocked(systemAbilityId);
+ }
+ 
+ ErrCode WifiSaLoadManager::UnloadWifiSa(int32_t systemAbilityId)
+ {
+     WIFI_LOGI("%{public}s enter, systemAbilityId = [%{public}d] unloading", __func__, systemAbilityId);
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        loadedSet_.erase(systemAbilityId);
++        loadingSet_.erase(systemAbilityId);
++        lastTriggerMap_.erase(systemAbilityId);
++    }
+     sptr<ISystemAbilityManager> samgr =
+         SystemAbilityManagerClient::GetInstance().GetSystemAbilityManager();
+     if (samgr == nullptr) {
+@@ -97,31 +169,28 @@ ErrCode WifiSaLoadManager::UnloadWifiSa(int32_t systemAbilityId)
+     return WIFI_OPT_SUCCESS;
+ }
+ 
+-void WifiSaLoadManager::LoadSystemAbilitySuccess()
++void WifiSaLoadManager::OnLoadSuccess(int32_t systemAbilityId)
+ {
+-    std::unique_lock<std::mutex> lock(locatorMutex_);
+-    state_ = true;
+-    locatorCon_.notify_one();
++    Cache(systemAbilityId);
+ }
+ 
+-void WifiSaLoadManager::LoadSystemAbilityFail()
++void WifiSaLoadManager::OnLoadFail(int32_t systemAbilityId)
+ {
+-    std::unique_lock<std::mutex> lock(locatorMutex_);
+-    state_ = false;
+-    locatorCon_.notify_one();
++    std::lock_guard<std::mutex> lock(mutex_);
++    loadingSet_.erase(systemAbilityId);
+ }
+ 
+ void WifiSaLoadCallback::OnLoadSystemAbilitySuccess(
+     int32_t systemAbilityId, const sptr<IRemoteObject> &remoteObject)
+ {
+     WIFI_LOGD("WifiSaLoadManager Load SA success, systemAbilityId = [%{public}d]", systemAbilityId);
+-    WifiSaLoadManager::GetInstance().LoadSystemAbilitySuccess();
++    WifiSaLoadManager::GetInstance().OnLoadSuccess(systemAbilityId);
+ }
+ 
+ void WifiSaLoadCallback::OnLoadSystemAbilityFail(int32_t systemAbilityId)
+ {
+     WIFI_LOGI("WifiSaLoadManager Load SA failed, systemAbilityId = [%{public}d]", systemAbilityId);
+-    WifiSaLoadManager::GetInstance().LoadSystemAbilityFail();
++    WifiSaLoadManager::GetInstance().OnLoadFail(systemAbilityId);
+ }
+ }; // namespace Wifi
+-}; // namespace OHOS
+\ No newline at end of file
++}; // namespace OHOS

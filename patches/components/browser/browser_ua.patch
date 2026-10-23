@@ -1,0 +1,53 @@
+--- /home/katax/Public/OHOS/applications/standard/browser/common/src/main/ets/utils/BrowserDeviceProfile.ets	2026-09-16 23:21:00.152096050 +0800
++++ /home/katax/Public/OHOS/out/x86_64_virt/ohos-dbg/porting/browser_src/common/src/main/ets/utils/BrowserDeviceProfile.ets	2026-10-09 16:50:19.069333427 +0800
+@@ -16,4 +16,10 @@
+     const type = deviceInfo.deviceType
+     return type === 'phone' || type === 'default'
+   }
++
++  /** 是否为 2in1 / PC 形态：需要桌面版 User-Agent 与桌面版页面 */
++  static isPcFormFactor(): boolean {
++    const type = deviceInfo.deviceType
++    return type === '2in1'
++  }
+ }
+--- /home/katax/Public/OHOS/applications/standard/browser/feature/browser_core/src/main/ets/web/WebPageController.ets	2026-09-16 23:21:00.164898922 +0800
++++ /home/katax/Public/OHOS/out/x86_64_virt/ohos-dbg/porting/browser_src/feature/browser_core/src/main/ets/web/WebPageController.ets	2026-10-09 16:50:37.776450519 +0800
+@@ -1,6 +1,6 @@
+ import { webview } from '@kit.ArkWeb'
+ import { image } from '@kit.ImageKit'
+-import { BrowserLog } from 'common'
++import { BrowserLog, BrowserDeviceProfile } from 'common'
+ import { TabThumbnailService } from '../tab/TabThumbnailService'
+ 
+ /** Web 层控制器，封装 ArkWeb WebviewController */
+@@ -37,7 +37,12 @@
+     }
+   }
+ 
+-  /** 确保 UA 含 Mobile，使站点按移动端 viewport 渲染；若已修改则返回 true */
++  /**
++   * 调整页面 User-Agent：
++   * - 2in1 / PC 形态：改为桌面版 UA（DeviceType=PC，去除 Mobile），使站点下发桌面版页面；
++   * - 其它形态：确保 UA 含 Mobile，使站点按移动端 viewport 渲染。
++   * 若已修改则返回 true。
++   */
+   ensureMobileUserAgent(): boolean {
+     const ctrl = this.controller
+     if (!ctrl) {
+@@ -45,6 +50,15 @@
+     }
+     try {
+       const ua = ctrl.getUserAgent()
++      if (BrowserDeviceProfile.isPcFormFactor()) {
++        const desktopUa = ua.replace(/\s*Mobile\b/gi, '').replace(/\(\s*Phone\s*;/i, '(PC;')
++        if (desktopUa === ua) {
++          return false
++        }
++        ctrl.setCustomUserAgent(desktopUa)
++        BrowserLog.info('[WebPage] set desktop User-Agent')
++        return true
++      }
+       if (/Mobile/i.test(ua)) {
+         return false
+       }

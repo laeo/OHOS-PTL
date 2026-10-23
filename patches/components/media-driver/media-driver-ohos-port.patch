@@ -1,0 +1,32 @@
+diff --git a/Tools/bldsys/include/utils.cmake b/Tools/bldsys/include/utils.cmake
+index 777c810..f5a2f78 100644
+--- a/Tools/bldsys/include/utils.cmake
++++ b/Tools/bldsys/include/utils.cmake
+@@ -55,7 +55,10 @@ macro(bs_set_defines)
+     endif (${PLATFORM} STREQUAL "ghs")
+ 
+     if(NOT ${PLATFORM} STREQUAL "qnx")
+-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
++        # NOTE(ohos-port): upstream pins -std=c++11 here which silently overrides the
++        # -std=c++14 of the common flag list and breaks std::make_unique users.
++        # Use c++14 to match the rest of the build.
++        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+     endif()
+ 
+     if (${PLATFORM} STREQUAL linux)
+diff --git a/media_driver/cmake/linux/media_compile_flags_linux.cmake b/media_driver/cmake/linux/media_compile_flags_linux.cmake
+index 397e8c5..a9ed35c 100755
+--- a/media_driver/cmake/linux/media_compile_flags_linux.cmake
++++ b/media_driver/cmake/linux/media_compile_flags_linux.cmake
+@@ -52,8 +52,9 @@ set(MEDIA_COMPILER_FLAGS_COMMON
+     -ffunction-sections
+     -Wl,--gc-sections
+ 
+-    # Enable c++14 features
+-    -std=c++14
++    # NOTE(ohos-port): -std=c++14 removed from the *common* flag list: it is applied
++    # to C sources as well, and clang (unlike gcc) rejects -std=c++14 for C.
++    # C++ sources still get -std=c++1y via MEDIA_COMPILER_CXX_FLAGS_COMMON.
+     # -m32 or -m64
+     -m${ARCH}
+ 

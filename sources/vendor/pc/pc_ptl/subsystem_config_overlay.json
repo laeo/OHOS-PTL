@@ -1,0 +1,6 @@
+{
+  "device_x86_64_virt": {
+    "path": "device/qemu/x86_64_virt/linux_full",
+    "name": "device_x86_64_virt"
+  }
+}

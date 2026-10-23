@@ -1,0 +1,38 @@
+{
+  "name": "@ohos/terminal",
+  "description": "Terminal application (ArkUI front end) and its PTY broker daemon for the OpenHarmony PC image",
+  "homePage": "https://gitee.com/openharmony",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "repository": "https://gitee.com/openharmony/applications_standard",
+  "supplier": "Organization: OpenHarmony",
+  "publishAs": "code-segment",
+  "segment": {
+    "destPath": "applications/standard/terminal"
+  },
+  "dirs": {},
+  "scripts": {},
+  "component": {
+    "name": "pc_terminal",
+    "subsystem": "applications",
+    "features": [],
+    "adapted_system_type": [
+      "standard"
+    ],
+    "rom": "1MB",
+    "ram": "",
+    "deps": {
+      "components": [
+        "c_utils"
+      ],
+      "third_party": []
+    },
+    "build": {
+      "sub_component": [
+        "//applications/standard/terminal:pc_terminal"
+      ],
+      "inner_kits": [],
+      "test": []
+    }
+  }
+}

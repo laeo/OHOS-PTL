@@ -1,0 +1,202 @@
+diff --git a/common/virt_full/kernel/BUILD.gn b/common/virt_full/kernel/BUILD.gn
+index 793732c..58119ee 100755
+--- a/common/virt_full/kernel/BUILD.gn
++++ b/common/virt_full/kernel/BUILD.gn
+@@ -5,51 +5,62 @@ import("//build/ohos.gni")
+ import("//build/ohos/kernel/kernel.gni")
+ import("//device/qemu/common/virt_full/device.gni")
+ 
+-kernel_build_script_dir = "//device/qemu/common/virt_full/kernel"
+-kernel_source_dir = "//kernel/linux/linux-6.6"
+-kernel_modules_dir = "$root_build_dir/kernel_modules"
+-kernel_module_outputs = [
+-  "$kernel_modules_dir/rtw89_core.ko",
+-  "$kernel_modules_dir/rtw89_pci.ko",
+-  "$kernel_modules_dir/rtw89_8852a.ko",
+-  "$kernel_modules_dir/rtw89_8852ae.ko",
+-  "$kernel_modules_dir/mt7601u.ko",
+-  "$kernel_modules_dir/mac80211_hwsim.ko",
+-  "$kernel_modules_dir/virt_wifi.ko",
+-  "$kernel_modules_dir/libarc4.ko",
+-  "$kernel_modules_dir/mac80211.ko",
+-  "$kernel_modules_dir/cfg80211.ko",
+-  "$kernel_modules_dir/iwlwifi.ko",
+-  "$kernel_modules_dir/iwlmvm.ko",
+-]
+-
+-kernel_image = ""
+-if (target_cpu == "arm") {
+-  kernel_image = "zImage"
+-} else if (target_cpu == "arm64") {
+-  kernel_image = "Image"
+-} else if (target_cpu == "riscv64") {
+-  kernel_image = "Image"
+-} else if (target_cpu == "x86_64") {
+-  kernel_image = "bzImage"
+-}
+-
+-action("build_kernel") {
+-  script = "build_kernel.sh"
+-  sources = [ kernel_source_dir ]
+-  outputs = [ "$root_build_dir/packages/phone/images/$kernel_image" ]
+-  outputs += kernel_module_outputs
+-  args = [
+-      rebase_path(kernel_build_script_dir,root_build_dir),
+-      rebase_path("$root_build_dir/../.."),
+-      rebase_path("$root_build_dir/packages/phone/images"),
+-      rebase_path(kernel_source_dir),
+-      rebase_path(kernel_build_script_dir),
+-      target_cpu,
+-      rebase_path(kernel_modules_dir, root_build_dir),
+-  ]  
++# linux-6.18 has no OpenHarmony-private board patches. Reuse the shared,
++# version-aware standard kernel build (kernel/linux/build:linux_kernel)
++# instead of this board script, which is pinned to the 6.6 layout.
++if (linux_kernel_version == "linux-6.6") {
++  kernel_build_script_dir = "//device/qemu/common/virt_full/kernel"
++  kernel_source_dir = "//kernel/linux/$linux_kernel_version"
++  kernel_modules_dir = "$root_build_dir/kernel_modules"
++
++  kernel_image = ""
++  if (target_cpu == "arm") {
++    kernel_image = "zImage"
++  } else if (target_cpu == "arm64") {
++    kernel_image = "Image"
++  } else if (target_cpu == "riscv64") {
++    kernel_image = "Image"
++  } else if (target_cpu == "x86_64") {
++    kernel_image = "bzImage"
++  }
++
++  kernel_module_outputs = [
++    "$kernel_modules_dir/rtw89_core.ko",
++    "$kernel_modules_dir/rtw89_pci.ko",
++    "$kernel_modules_dir/rtw89_8852a.ko",
++    "$kernel_modules_dir/rtw89_8852ae.ko",
++    "$kernel_modules_dir/mt7601u.ko",
++    "$kernel_modules_dir/mac80211_hwsim.ko",
++    "$kernel_modules_dir/virt_wifi.ko",
++    "$kernel_modules_dir/libarc4.ko",
++    "$kernel_modules_dir/mac80211.ko",
++    "$kernel_modules_dir/cfg80211.ko",
++    "$kernel_modules_dir/iwlwifi.ko",
++    "$kernel_modules_dir/iwlmvm.ko",
++  ]
++
++  action("build_kernel") {
++    script = "build_kernel.sh"
++    sources = [ kernel_source_dir ]
++    outputs = [ "$root_build_dir/packages/phone/images/$kernel_image" ]
++    outputs += kernel_module_outputs
++    args = [
++        rebase_path(kernel_build_script_dir,root_build_dir),
++        rebase_path("$root_build_dir/../.."),
++        rebase_path("$root_build_dir/packages/phone/images"),
++        rebase_path(kernel_source_dir),
++        rebase_path(kernel_build_script_dir),
++        target_cpu,
++        rebase_path(kernel_modules_dir, root_build_dir),
++    ]  
++  }
++} else {
++  group("build_kernel") {
++    deps = [ "//kernel/linux/build:linux_kernel" ]
++  }
+ }
+ 
++if (linux_kernel_version == "linux-6.6") {
+ ohos_prebuilt_etc("rtw89_core") {
+   source = "$kernel_modules_dir/rtw89_core.ko"
+   install_images = [ vendor_base_dir ]
+@@ -174,3 +185,8 @@ group("virt_ko") {
+     ":iwlmvm",
+   ]
+ }
++} else {
++group("virt_ko") {
++  deps = []
++}
++}
+diff --git a/x86_64_virt/linux/chipset/BUILD.gn b/x86_64_virt/linux/chipset/BUILD.gn
+index 336a45b..b7d08c3 100644
+--- a/x86_64_virt/linux/chipset/BUILD.gn
++++ b/x86_64_virt/linux/chipset/BUILD.gn
+@@ -11,7 +11,6 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import("//build/ohos.gni")
+-import("//device/qemu/x86_64_virt/linux/part_name.gni")
+ 
+ ohos_prebuilt_etc("fstab.qemu.x86_64.linux") {
+   source = "etc/fstab.qemu.x86_64.linux"
+diff --git a/x86_64_virt/linux/rootfs/init.qemu.x86_64.linux.cfg b/x86_64_virt/linux/rootfs/init.qemu.x86_64.linux.cfg
+index cf6ac9f..b9fbffc 100644
+--- a/x86_64_virt/linux/rootfs/init.qemu.x86_64.linux.cfg
++++ b/x86_64_virt/linux/rootfs/init.qemu.x86_64.linux.cfg
+@@ -1,28 +1,38 @@
+-{
+-    "import" : [
+-            "init.qemu.x86_64.linux.usb.cfg"
+-    ],
+-    "jobs" : [{
+-            "name" : "pre-init",
+-            "cmds" : [
+-                "write /proc/sys/vm/min_free_kbytes 10240"
+-            ]
+-        }, {
+-            "name" : "init",
+-            "cmds" : [
+-                "mount debugfs /sys/kernel/debug /sys/kernel/debug mode=755"
+-            ]
+-        }, {
+-            "name" : "fs",
+-            "cmds" : [
+-            ]
+-        }, {
+-            "name" : "boot",
+-            "cmds" : [
+-                "chmod 777 /dev/ttyAMA2",
+-                "chmod 0440 /proc/interrupts",
+-                "chmod 0440 /proc/stat"
+-            ]
+-        }
+-    ]
+-}
++{
++    "import" : [
++            "init.qemu.x86_64.linux.usb.cfg"
++    ],
++    "jobs" : [{
++            "name" : "pre-init",
++            "cmds" : [
++                "write /proc/sys/vm/min_free_kbytes 10240"
++            ]
++        }, {
++            "name" : "init",
++            "cmds" : [
++                "mount debugfs /sys/kernel/debug /sys/kernel/debug mode=755",
++                "setparam persist.hdc.mode.usb disable",
++                "setparam persist.hdc.mode.tcp enable",
++                "setparam persist.hdc.port 8710",
++                "setparam persist.hdc.mode tcp",
++                "setparam const.debuggable 1"
++            ]
++        }, {
++            "name" : "fs",
++            "cmds" : [
++            ]
++        }, {
++            "name" : "boot",
++            "cmds" : [
++                "chmod 777 /dev/ttyAMA2",
++                "chmod 0440 /proc/interrupts",
++                "chmod 0440 /proc/stat",
++                "chmod 666 /dev/dri/card0",
++                "chmod 666 /dev/dri/renderD128",
++                "chown system graphics /dev/dri/card0",
++                "chown system graphics /dev/dri/renderD128",
++                "start console"
++            ]
++        }
++    ]
++}

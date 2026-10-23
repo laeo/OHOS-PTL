@@ -1,0 +1,61 @@
+--- a/base/startup/ohos_diag/ohos-diag
++++ b/base/startup/ohos_diag/ohos-diag
+@@ -577,6 +577,14 @@
+                     sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100;" 2>&1
+                     echo "--- count(pc_mode_gridlayout_info_desktop_null_area) ---"
+                     sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100 and (width is null or height is null);" 2>&1
++                    # fix_desktop2: 桌面项的 page_index 不能是 NULL ——
++                    # PageDesktopViewModel.integrateSwiper() 里
++                    #   "if (mPage === undefined || mPage < 0 || ...) { logError } else { push }"
++                    # 没有 page 的元素不会被放进任何一页 -> 桌面页一个图标都不显示。
++                    echo "--- count(gridlayout_info_desktop_null_page) ---"
++                    sqlite3 "$db" "select count(*) from gridlayout_info where container=-100 and page_index is null;" 2>&1
++                    echo "--- count(pc_mode_gridlayout_info_desktop_null_page) ---"
++                    sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100 and page_index is null;" 2>&1
+                 } > "$W/A_desktop_rdb/$b.txt" 2>&1
+                 cat "$W/A_desktop_rdb/$b.txt" >> "$W/A_desktop.txt" 2>&1
+                 # also copy the raw db so it can be opened offline
+@@ -600,6 +608,11 @@
+         echo "--- count(DESKTOPFILTER) ---"
+         timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'DESKTOPFILTER'
+         echo
++        echo "--- fix_desktop2: SceneBoard integrateSwiper errors (items without a page are dropped) ---"
++        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a 'integrateSwiper page:' | tail -n 10
++        echo "--- count(integrateSwiper) ---"
++        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'integrateSwiper page:'
++        echo
+         echo "--- preset layoutInfo.json area check (every desktop item must have area) ---"
+         for f in /data/app/el1/*/base/com.ohos.sceneboard/haps/*/resources/rawfile/layoutInfo.json \
+                  /system/app/SceneBoard/*/resources/rawfile/layoutInfo.json; do
+@@ -808,6 +821,31 @@
+         v PASS "desktop/area-normalize" "$_d_area items had an invalid area (NULL width/height) and were repaired"
+     fi
+ 
++    # ---- fix_desktop2: 桌面项的 page_index 不能是 NULL（桌面空白的真正原因）----
++    _d_pnull=$(_rdbcount gridlayout_info_desktop_null_page)
++    _d_pcnullp=$(_rdbcount pc_mode_gridlayout_info_desktop_null_page)
++    _d_dnull=$(_rdbcount gridlayout_info_desktop_null_area)
++    _d_pcdnull=$(_rdbcount pc_mode_gridlayout_info_desktop_null_area)
++    _d_pg=1
++    [ "$_d_pnull" -eq 0 ] || _d_pg=0
++    if [ "$_d_pcnullp" -gt 0 ] && [ "$_d_pnull" -eq 0 ]; then _d_pg=0; fi
++    if [ "$_d_pg" -eq 1 ]; then
++        v PASS "desktop/db-page" "all desktop rows have a page_index (grid:$_d_pnull null, pc_mode:$_d_pcnullp null) and a valid area (grid:$_d_dnull null, pc_mode:$_d_pcdnull null)"
++    elif [ "$_d_dnull" -gt 0 ]; then
++        v FAIL "desktop/db-page" "$_d_dnull desktop rows have NULL width/height and $_d_pnull have NULL page_index -> they belong to no page and are never rendered"
++    else
++        v FAIL "desktop/db-page" "$_d_pnull desktop rows have a NULL page_index (grid) / $_d_pcnullp (pc_mode) -> integrateSwiper() drops them -> the desktop shows no icons"
++    fi
++
++    # ---- fix_desktop2: SceneBoard 自己报的 integrateSwiper 错误（page 丢失的现场证据）----
++    _d_isw=$(grep -ac 'integrateSwiper page:' "$W/A_desktop.txt" 2>/dev/null)
++    case "$_d_isw" in ''|*[!0-9]*) _d_isw=0 ;; esac
++    if [ "$_d_isw" -eq 0 ]; then
++        v PASS "desktop/integrate-swiper" "no integrateSwiper error (every desktop item landed on a page)"
++    else
++        v FAIL "desktop/integrate-swiper" "$_d_isw 'integrateSwiper page:' errors -> items without a page are dropped"
++    fi
++
+     # ---- fix_desktop2: RS 节点树里的桌面图标节点（最硬的判据）----
+     _d_rs=$(sed -n 's/^rs_desktop_icon_nodes=\([0-9][0-9]*\).*/\1/p' "$W/A_desktop.txt" 2>/dev/null | tail -1)
+     case "$_d_rs" in ''|*[!0-9]*) _d_rs=-1 ;; esac

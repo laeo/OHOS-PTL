@@ -1,0 +1,335 @@
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialSurface.ets b/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialSurface.ets
+index ad42739..c2b6cfa 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialSurface.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialSurface.ets
+@@ -1,4 +1,7 @@
+-import { HdsTabs, HdsTabsController, HdsTabsFloatingStyle, hdsMaterial } from '@kit.UIDesignKit';
++// [fix_input_aira] HMS HDS（HdsTabs / HdsTabsController / HdsTabsFloatingStyle）在
++// OpenHarmony 上不存在：运行时加载失败会在 build() 里抛未捕获异常 → 应用被杀。
++// 这里改用普通 ArkUI 的 Tabs 组件画同一块「背板」，交互不变，只是没有 HDS 的沉浸式材质。
++import { hdsMaterial } from '../../../platform/huawei/OpenHarmonyHdsMaterialShim';
+ 
+ /**
+  * Immersive light-sense backplate for any floating chrome cluster.
+@@ -20,10 +23,10 @@ export struct HdsImmersiveMaterialSurface {
+   @Prop plateHeight: number = 1;
+   @Prop plateRadius: number = 0;
+   @Prop plateOpacity: number = 1;
+-  private controller: HdsTabsController = new HdsTabsController();
+-
+   build() {
+-    HdsTabs({ controller: this.controller }) {
++    // [fix_input_aira] 原来这里用 HdsTabs 画一块沉浸式材质背板；OpenHarmony 没有 HDS，
++    // 于是改成普通 Tabs：仍然是一块透明背板，尺寸/圆角/透明度语义保持一致。
++    Tabs() {
+       TabContent() {
+         Column()
+           .width('100%')
+@@ -40,13 +43,11 @@ export struct HdsImmersiveMaterialSurface {
+     .barHeight(this.resolvePlateHeight())
+     .barBackgroundColor($r('sys.color.ohos_id_color_background_transparent'))
+     .barBackgroundBlurStyle(BlurStyle.NONE)
+-    .barFloatingStyle(this.resolveFloatingStyle())
+     .width('100%')
+     .height('100%')
+     .borderRadius(this.plateRadius)
+-    // Stay clipped to the cluster outline: HDS materializes its bar as a rectangle, so
+-    // without this the square body leaks past a rounded plate. Anything that needs a drop
+-    // shadow must draw it on its own unclipped layer.
++    // Stay clipped to the cluster outline, so the square body does not leak past a
++    // rounded plate. Anything that needs a drop shadow must draw it on its own layer.
+     .clip(true)
+     .opacity(this.plateOpacity)
+     .hitTestBehavior(HitTestMode.None)
+@@ -69,27 +70,4 @@ export struct HdsImmersiveMaterialSurface {
+   private resolvePlateHeight(): number {
+     return Math.max(1, this.plateHeight);
+   }
+-
+-  private resolveFloatingStyle(): HdsTabsFloatingStyle {
+-    const width: number = this.resolvePlateWidth();
+-    const style: HdsTabsFloatingStyle = {
+-      barSideMargin: 0,
+-      barBottomMargin: 0,
+-      barOpacity: 1,
+-      // Symbolic widths are ignored by the floating bar; it needs the concrete vp width,
+-      // and all three breakpoints must carry it or the capsule falls back to item sizing.
+-      barWidth: {
+-        smallWidth: width,
+-        mediumWidth: width,
+-        largeWidth: width
+-      }
+-    };
+-    // ADAPTIVE lets the system pick the material strength for the device, which the
+-    // power guidance recommends over pinning a level per device class.
+-    style.systemMaterialEffect = {
+-      materialType: hdsMaterial.MaterialType.ADAPTIVE,
+-      materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+-    };
+-    return style;
+-  }
+ }
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialTokens.ets b/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialTokens.ets
+index ff160e0..32e80c6 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialTokens.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/common/HdsImmersiveMaterialTokens.ets
+@@ -1,4 +1,6 @@
+-import { hdsMaterial } from '@kit.UIDesignKit';
++// [fix_input_aira] HMS HDS 在 OpenHarmony 上不存在，改用本地垫片（恒报告「无 HDS 材质」）。
++// 应用自带的 isHdsMaterialAvailable() 因此返回 false，自动走普通 ArkUI 降级路径。
++import { hdsMaterial } from '../../../platform/huawei/OpenHarmonyHdsMaterialShim';
+ 
+ /**
+  * Immersive light-sense material is only reachable through HDS components. ArkUI's own
+@@ -15,11 +17,11 @@ export function isHdsMaterialAvailable(): boolean {
+     return cachedHdsMaterialAvailable;
+   }
+   try {
+-    const types: Array<hdsMaterial.MaterialType> = hdsMaterial.getSystemMaterialTypes();
++    const types: Array<number> = hdsMaterial.getSystemMaterialTypes();
+     // The query reports which material types this device can actually render. IMMERSIVE is
+     // the capability marker in the HDS guidance and ADAPTIVE is the follow-system policy;
+     // accept any non-NONE entry so a device that reports either one still gets the material.
+-    cachedHdsMaterialAvailable = types.some((type: hdsMaterial.MaterialType) =>
++    cachedHdsMaterialAvailable = types.some((type: number) =>
+       type !== hdsMaterial.MaterialType.NONE);
+   } catch (_error) {
+     cachedHdsMaterialAvailable = false;
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsHdsScaffold.ets b/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsHdsScaffold.ets
+index f4a498e..31881e2 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsHdsScaffold.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsHdsScaffold.ets
+@@ -1,15 +1,9 @@
+ import { common } from '@kit.AbilityKit';
+ import { BROWSER_THEME_STORAGE_RESOLVED_MODE_KEY } from '../../../core/theme/BrowserThemeStorageKeys';
+-import {
+-  BlurStrategy,
+-  DividerShowType,
+-  HdsNavDestination,
+-  HdsNavDestinationTitleMode,
+-  hdsMaterial,
+-  IconStyleMode,
+-  ScrollEffectType,
+-  TitleSize
+-} from '@kit.UIDesignKit';
++// [fix_input_aira] HMS HDS（@kit.UIDesignKit）在 OpenHarmony 上不存在：
++// HdsNavDestination 这类 ArkUI 组件在运行时加载失败，build() 里调用会抛未捕获异常，
++// 直接把应用杀掉（「数据同步 → 自建」闪退就是这条路径）。
++// 因此这里完全不用 HDS：标题栏改用普通 ArkUI 画，材质能力用本地垫片（恒为不可用）。
+ import { LengthMetrics, window } from '@kit.ArkUI';
+ import { BrowserStatusBarStyleService } from '../../../services/browser/BrowserStatusBarStyleService';
+ import { SettingsTopSafeInsetService } from '../../../services/settings/SettingsTopSafeInsetService';
+@@ -44,6 +38,10 @@ const SETTINGS_TITLE_BAR_CUSTOM_MENU_BUTTON_GAP: number = 8;
+ const SETTINGS_TITLE_BAR_CUSTOM_MENU_BUTTON_LEFT: number = 16;
+ const SETTINGS_TITLE_BAR_CUSTOM_MENU_BUTTON_RIGHT: number = 16;
+ const SETTINGS_TITLE_BAR_ACTION_ICON_SIZE: number = 21;
++// [fix_input_aira] 普通 ArkUI 标题栏（替代 HDS 的 HdsNavDestination 标题栏）
++const SETTINGS_TITLE_BAR_HEIGHT: number = 48;
++const SETTINGS_TITLE_BAR_TITLE_LEFT_PADDING: number = 56;
++const SETTINGS_TITLE_BAR_TITLE_RIGHT_PADDING: number = 56;
+ const SETTINGS_TITLE_BAR_TEXT_ACTION_HEIGHT: number = 36;
+ const SETTINGS_TITLE_BAR_TEXT_ACTION_HORIZONTAL_PADDING: number = 16;
+ const SETTINGS_TITLE_BAR_TEXT_ACTION_FONT_SIZE: number = 14;
+@@ -142,104 +140,15 @@ export struct SettingsHdsScaffold {
+         .width('100%')
+         .height(this.useTopSafeInset ? this.resolveTopSafeInset() : 0)
+       Stack() {
+-      HdsNavDestination() {
+-        this.buildContentFrame()
+-      }
+-      .width('100%')
+-      .height('100%')
+-      .backgroundColor(this.pageBackground)
+-      .titleBar({
+-        content: {
+-          title: {
+-            mainTitle: this.title,
+-            mainTitleSize: TitleSize.TITLE_S
+-          },
+-          backIcon: {
+-            label: this.resolveBackLabel(),
+-            icon: this.resolveBackIcon(),
+-            isEnabled: false,
+-            type: IconStyleMode.NORMAL,
+-            action: () => {}
+-          },
+-          menu: undefined,
+-          divider: {
+-            showType: DividerShowType.AUTO
+-          }
+-        },
+-        avoidLayoutSafeArea: false,
+-        enableComponentSafeArea: true,
+-        style: {
+-          scrollEffectOpts: {
+-            enableScrollEffect: this.resolveHeaderBlurEnabled(),
+-            scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR,
+-            blurEffectiveStartOffset: LengthMetrics.vp(0),
+-            blurEffectiveEndOffset: LengthMetrics.vp(this.resolveHeaderBlurEnabled() ?
+-              BROWSER_SHEET_BLUR_SCROLL_RANGE_VP : 0)
+-          },
+-          blurStrategy: BlurStrategy.ADAPTIVE,
+-          originalStyle: {
+-            backgroundStyle: {
+-              backgroundColor: Color.Transparent,
+-              maskExtraHeight: 0,
+-              blurRadius: 0
+-            },
+-            contentStyle: {
+-              titleStyle: {
+-                mainTitleColor: this.primaryTextColor
+-              },
+-              backIconStyle: {
+-                backgroundColor: $r('sys.color.ohos_id_color_background_transparent'),
+-                iconColor: $r('sys.color.ohos_id_color_background_transparent')
+-              },
+-              menuStyle: {
+-                backgroundColor: $r('sys.color.ohos_id_color_background_transparent'),
+-                iconColor: $r('sys.color.ohos_id_color_background_transparent')
+-              },
+-              dividerStyle: {
+-                dividerColor: this.dividerColor
+-              }
+-            }
+-          },
+-          scrollEffectStyle: {
+-            backgroundStyle: {
+-              backgroundColor: Color.Transparent,
+-              maskExtraHeight: this.resolveHeaderBlurEnabled() ? 40 : 0,
+-              blurRadius: this.resolveHeaderBlurEnabled() ? 28 : 0
+-            },
+-            contentStyle: {
+-              titleStyle: {
+-                mainTitleColor: this.primaryTextColor
+-              },
+-              backIconStyle: {
+-                backgroundColor: $r('sys.color.ohos_id_color_background_transparent'),
+-                iconColor: $r('sys.color.ohos_id_color_background_transparent')
+-              },
+-              menuStyle: {
+-                backgroundColor: $r('sys.color.ohos_id_color_background_transparent'),
+-                iconColor: $r('sys.color.ohos_id_color_background_transparent')
+-              },
+-              dividerStyle: {
+-                dividerColor: this.dividerColor
+-              }
+-            }
+-          },
+-          systemMaterialEffect: {
+-            materialType: hdsMaterial.MaterialType.ADAPTIVE,
+-            materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+-          }
++        // [fix_input_aira] 原来这里是 HdsNavDestination() { content }.titleBar({...})，
++        // OpenHarmony 上没有 HDS → 组件加载失败 → build() 抛异常 → 应用被杀。
++        // 现在用普通 ArkUI：标题文字 + 内容，返回键/菜单仍由应用自己的玻璃按钮提供。
++        Column() {
++          this.buildPlainTitleBar()
++          this.buildContentFrame()
+         }
+-      })
+-      .titleMode(HdsNavDestinationTitleMode.MINI)
+-      .bindToScrollable(this.resolveTitleBarScrollers())
+-      .ignoreLayoutSafeArea(
+-        [LayoutSafeAreaType.SYSTEM],
+-        [LayoutSafeAreaEdge.BOTTOM]
+-      )
+-      .hideBackButton(!this.showBackButton)
+-      .onBackPressed(() => {
+-        this.onBack();
+-        return true;
+-      })
++        .width('100%')
++        .height('100%')
+ 
+       this.buildGlassTitleActions()
+       }
+@@ -261,6 +170,30 @@ export struct SettingsHdsScaffold {
+     }
+   }
+ 
++  /**
++   * [fix_input_aira] 普通 ArkUI 标题栏，替代 HDS 的 HdsNavDestination 标题栏。
++   * 视觉上没有 HDS 的毛玻璃/沉浸式材质，但标题、返回键、菜单按钮的位置关系保持一致。
++   */
++  @Builder
++  private buildPlainTitleBar() {
++    Row() {
++      Text(this.title)
++        .fontSize(20)
++        .fontWeight(FontWeight.Bold)
++        .fontColor(this.primaryTextColor)
++        .maxLines(1)
++        .textOverflow({ overflow: TextOverflow.Ellipsis })
++    }
++    .width('100%')
++    .height(SETTINGS_TITLE_BAR_HEIGHT)
++    .padding({
++      left: SETTINGS_TITLE_BAR_TITLE_LEFT_PADDING,
++      right: SETTINGS_TITLE_BAR_TITLE_RIGHT_PADDING
++    })
++    .alignItems(VerticalAlign.Center)
++    .backgroundColor(Color.Transparent)
++  }
++
+   @Builder
+   private buildGlassTitleActions() {
+     if (this.showBackButton) {
+diff --git a/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyHdsMaterialShim.ets b/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyHdsMaterialShim.ets
+new file mode 100644
+index 0000000..f004192
+--- /dev/null
++++ b/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyHdsMaterialShim.ets
+@@ -0,0 +1,53 @@
++/*
++ * [fix_input_aira] OpenHarmony 兼容垫片：HMS HDS（@kit.UIDesignKit）在 OpenHarmony 上不存在。
++ *
++ * 现象（真机 / QEMU 均可复现）：
++ *   打开 Aira 的「数据同步 → 自建」页面时进程被杀（reason=Js Error）。
++ *   原因：该页面用的 SettingsHdsScaffold 静态导入了 @kit.UIDesignKit 的
++ *   HdsNavDestination / HdsTabs 等 **ArkUI 组件**。OpenHarmony 设备上没有 HMS 的
++ *   HDS 运行库（out/ptl 里没有任何 hds 库），运行时加载这些模块会失败：
++ *       E C03f00/ArkCompiler: Load native module entry is not a JSObject
++ *   组件在 build() 里被调用时抛 TypeError（未捕获）→ ArkUI 渲染中断 → 应用被杀。
++ *
++ * 修法：把 HDS 的依赖从应用里彻底拿掉。
++ *   1) 材质能力（hdsMaterial）改用本地垫片，getSystemMaterialTypes() 恒返回空数组
++ *      → 应用自带的 isHdsMaterialAvailable() 判定为「不可用」→ 走应用本来就有的
++ *      普通 ArkUI 降级路径（这个降级路径本来就是为非 HMS 设备写的）。
++ *   2) HdsNavDestination / HdsTabs 这类**组件**无法用垫片等价实现，改为普通 ArkUI
++ *      组件（标题栏 / 面板），视觉效果退化为无毛玻璃，但功能与交互保持一致。
++ *
++ * 兼容性：如果将来在真正的 HarmonyOS 设备上跑这份 HAP，把 import 换回
++ * '@kit.UIDesignKit' 即可恢复 HDS 外观（代码里保留了原实现注释）。
++ */
++
++/** 材质类型（与 HMS hdsMaterial.MaterialType 取值一致）。 */
++export enum OpenHarmonyHdsMaterialType {
++  NONE = 0,
++  ADAPTIVE = 1,
++  IMMERSIVE = 2
++}
++
++/** 材质等级（与 HMS hdsMaterial.MaterialLevel 取值一致）。 */
++export enum OpenHarmonyHdsMaterialLevel {
++  NONE = 0,
++  ADAPTIVE = 1,
++  IMMERSIVE = 2
++}
++
++/**
++ * HMS hdsMaterial 的最小替身：材质类型/等级常量 + 能力查询。
++ * 恒定报告「本机没有任何 HDS 材质类型」，应用据此走普通 ArkUI 渲染路径。
++ */
++export class hdsMaterial {
++  static readonly MaterialType = OpenHarmonyHdsMaterialType;
++
++  static readonly MaterialLevel = OpenHarmonyHdsMaterialLevel;
++
++  /**
++   * 查询本机可渲染的材质类型。
++   * @returns 恒为空数组 —— OpenHarmony 没有 HDS。
++   */
++  static getSystemMaterialTypes(): number[] {
++    return [];
++  }
++}

@@ -1,0 +1,227 @@
+--- out/x86_64_virt/ohos-dbg/fix_sysperf/work/img_ohos-diag	2026-10-21 14:50:17.278011513 +0800
++++ base/startup/ohos_diag/ohos-diag	2026-10-21 15:12:55.992552329 +0800
+@@ -1,7 +1,7 @@
+ #!/bin/sh
+ # ohos-diag - one-command diagnostic bundle for the pc_ptl (Intel PTL) build.
+ #
+-#   ohos-diag                 # everything (A..E) -> <OUTDIR>/diag-<ts>.tar.gz
++#   ohos-diag                 # everything (A..F) -> <OUTDIR>/diag-<ts>.tar.gz
+ #   ohos-diag quick           # fast subset (used before reboot/shutdown)
+ #   ohos-diag desktop audio   # only the named sections
+ #
+@@ -81,8 +81,8 @@
+ fi
+ 
+ SECTIONS="$*"
+-[ -n "$SECTIONS" ] || SECTIONS="desktop bluetooth audio ime system"
+-[ "$SECTIONS" = "quick" ] && SECTIONS="desktop bluetooth audio ime system"
++[ -n "$SECTIONS" ] || SECTIONS="desktop bluetooth audio ime system perf"
++[ "$SECTIONS" = "quick" ] && SECTIONS="desktop bluetooth audio ime system perf"
+ 
+ want() {
+     for s in $SECTIONS; do
+@@ -462,6 +462,196 @@
+ }
+ 
+ # =============================================================================
++# F. 性能 / Performance  (图形后端 + CPU 频率 + 负载)   [2026-10-21 新增]
++#
++# 目的：一次性取证"整机操作都卡"的系统级原因。
++#   F1 到底在用哪个 GL 后端（iris / zink / softpipe / llvmpipe）——最关键
++#   F2 CPU 频率与 governor（intel_pstate 是否锁在低频）
++#   F3 负载 / 内存 / 每进程 CPU%
++#   F4 DRM / xe 内核态状态
++#   F5 Mesa / EGL 日志 + RS 每帧日志噪声计数
++# 注意：设备上没有 awk / tr，全部用 sed/cut/grep 实现。
++# =============================================================================
++
++# 采样一次所有进程的 utime+stime（tick）
++cpu_snap() {
++    _out=$1
++    : > "$_out" 2>/dev/null
++    for _d in /proc/[0-9]*; do
++        [ -r "$_d/stat" ] || continue
++        _pid=${_d#/proc/}
++        _rest=$(sed 's/^.*) //' "$_d/stat" 2>/dev/null)
++        [ -n "$_rest" ] || continue
++        _u=$(echo "$_rest" | cut -d' ' -f12)
++        _s=$(echo "$_rest" | cut -d' ' -f13)
++        case "$_u" in ''|*[!0-9]*) continue;; esac
++        case "$_s" in ''|*[!0-9]*) _s=0;; esac
++        _n=$(cat "$_d/comm" 2>/dev/null)
++        echo "$_pid $(( _u + _s )) $_n" >> "$_out" 2>/dev/null
++    done
++}
++
++# 对比两次采样，算每进程 CPU%（相对单核，HZ 取 100）
++cpu_diff() {
++    _a=$1; _b=$2; _win=${3:-3}; _hz=100
++    echo "pid  ticks  cpu%($(echo "$_win" | cut -d. -f1)s, HZ=$_hz)  name"
++    while read -r _pid _t _n; do
++        _t2=$(grep "^$_pid " "$_b" 2>/dev/null | cut -d' ' -f2)
++        [ -n "$_t2" ] || continue
++        _d=$(( _t2 - _t ))
++        [ "$_d" -le 0 ] && continue
++        _pct=$(( _d * 100 / (_hz * _win) ))
++        echo "$_pid $_d ${_pct}% $_n"
++    done < "$_a" 2>/dev/null | sort -k2 -n -r | head -25
++}
++
++sec_perf() {
++    banner F/perf
++    hdr F_perf.txt "F. PERFORMANCE / GRAPHICS STACK"
++
++    # ---- F1 图形后端：最关键 ------------------------------------------------
++    {
++        echo "--- F1 graphics backend (MOST IMPORTANT) ---"
++        echo "--- hidumper RenderService -a gles (GL_RENDERER / GL_VERSION) ---"
++        runsh "$W/F_hidumper_gles.txt" "$T_CMD" 'hidumper -s RenderService -a gles 2>&1 | head -100'
++        cat "$W/F_hidumper_gles.txt" 2>/dev/null
++        echo
++        echo "--- hidumper RenderService -a screen (resolution / power / vsync) ---"
++        runsh "$W/F_hidumper_screen.txt" "$T_CMD" 'hidumper -s RenderService -a screen 2>&1 | head -200'
++        cat "$W/F_hidumper_screen.txt" 2>/dev/null
++        echo
++        echo "--- hidumper RenderService -a fps ---"
++        runsh "$W/F_hidumper_fps.txt" "$T_CMD" 'hidumper -s RenderService -a fps 2>&1 | head -100'
++        cat "$W/F_hidumper_fps.txt" 2>/dev/null
++        echo
++        echo "--- hidumper RenderService -a hitchs (掉帧) ---"
++        runsh "$W/F_hidumper_hitchs.txt" "$T_CMD" 'hidumper -s RenderService -a hitchs 2>&1 | head -300'
++        cat "$W/F_hidumper_hitchs.txt" 2>/dev/null
++    } >> "$W/F_perf.txt" 2>&1
++
++    # ---- F2 CPU 频率 / governor ---------------------------------------------
++    {
++        echo
++        echo "--- F2 CPU frequency / governor / intel_pstate ---"
++        echo "--- /sys/devices/system/cpu/cpu*/cpufreq ---"
++        for p in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
++            [ -d "$p" ] || continue
++            echo "== $p =="
++            for f in scaling_cur_freq scaling_min_freq scaling_max_freq \
++                     scaling_governor scaling_available_governors scaling_driver \
++                     cpuinfo_max_freq cpuinfo_min_freq; do
++                if [ -r "$p/$f" ]; then echo "  $f = $(cat "$p/$f" 2>/dev/null)"; fi
++            done
++        done
++        echo
++        echo "--- /sys/devices/system/cpu/cpufreq/policy* (intel_pstyle 视图) ---"
++        for p in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
++            [ -d "$p" ] || continue
++            echo "== $p =="
++            for f in scaling_cur_freq scaling_min_freq scaling_max_freq \
++                     scaling_governor scaling_available_governors \
++                     energy_performance_preference; do
++                if [ -r "$p/$f" ]; then echo "  $f = $(cat "$p/$f" 2>/dev/null)"; fi
++            done
++        done
++        echo
++        echo "--- /sys/devices/system/cpu/intel_pstate ---"
++        for f in /sys/devices/system/cpu/intel_pstate/*; do
++            [ -r "$f" ] && echo "  $(basename "$f") = $(cat "$f" 2>/dev/null)"
++        done
++        echo
++        echo "--- /sys/devices/system/cpu/cpuidle (idle 状态) ---"
++        for c in /sys/devices/system/cpu/cpu[0-9]*; do
++            [ -r "$c/cpuidle/state1/name" ] || continue
++            echo "  $(basename "$c") state1=$(cat "$c/cpuidle/state1/name" 2>/dev/null) disable=$(cat "$c/cpuidle/state1/disable" 2>/dev/null)"
++        done
++        echo
++        echo "--- /proc/cpuinfo (model / MHz) ---"
++        grep -aE "model name|^processor|cpu MHz" /proc/cpuinfo 2>/dev/null | head -80
++    } >> "$W/F_perf.txt" 2>&1
++
++    # ---- F3 负载 / 内存 / 每进程 CPU ----------------------------------------
++    {
++        echo
++        echo "--- F3 load / memory / per-process CPU% ---"
++        echo "--- /proc/loadavg ---"; cat /proc/loadavg 2>/dev/null
++        echo "--- /proc/uptime ---"; cat /proc/uptime 2>/dev/null
++        echo "--- uptime ---"; uptime 2>/dev/null
++        echo "--- free -m ---"; free -m 2>/dev/null || head -6 /proc/meminfo
++        echo "--- /proc/meminfo (head) ---"; head -12 /proc/meminfo 2>/dev/null
++        echo "--- top -b -n1 ---"; top -b -n 1 2>&1 | head -40
++        echo
++        echo "--- per-process CPU% over 3s (delta utime+stime; HZ assumed 100) ---"
++        cpu_snap "$W/.cpu1"
++        sleep 3
++        cpu_snap "$W/.cpu2"
++        cpu_diff "$W/.cpu1" "$W/.cpu2" 3
++        rm -f "$W/.cpu1" "$W/.cpu2" 2>/dev/null
++        echo
++        echo "--- key processes ---"
++        ps -A 2>/dev/null | grep -aE "render_service|sceneboard|web_render|appspawn|foundation|composer_host|display_manager|arkweb|surface" || echo "(none)"
++    } >> "$W/F_perf.txt" 2>&1
++
++    # ---- F4 DRM / xe / GPU 内核态 ------------------------------------------
++    {
++        echo
++        echo "--- F4 DRM / xe / GPU state ---"
++        echo "--- /dev/dri ---"; ls -la /dev/dri 2>/dev/null
++        echo "--- /sys/class/drm/card*-*/status ---"
++        for s in /sys/class/drm/card[0-9]*-*/status; do
++            [ -r "$s" ] && echo "  $s = $(cat "$s" 2>/dev/null)"
++        done
++        echo "--- card device ids ---"
++        for c in /sys/class/drm/card[0-9]*; do
++            [ -d "$c/device" ] || continue
++            echo "  $(basename "$c"): vendor=$(cat "$c/device/vendor" 2>/dev/null) device=$(cat "$c/device/device" 2>/dev/null)"
++            echo "     driver -> $(ls -l "$c/device/driver" 2>/dev/null | sed 's/.*-> //')"
++        done
++        echo "--- /sys/kernel/debug/dri/* (name / state / clients) ---"
++        for d in /sys/kernel/debug/dri/*; do
++            [ -d "$d" ] || continue
++            echo "== $d =="
++            for f in name state clients; do
++                if [ -r "$d/$f" ]; then echo "-- $f --"; head -80 "$d/$f" 2>/dev/null; fi
++            done
++        done
++        echo "--- lsmod (xe / i915 / drm) ---"; lsmod 2>/dev/null | grep -aiE "xe|i915|drm|gpu|ttm"
++        echo "--- dmesg | grep -i xe ---"
++        dmesg 2>/dev/null | grep -aiE "xe|drm|gpu|i915" | tail -250
++    } >> "$W/F_perf.txt" 2>&1
++
++    # ---- F5 Mesa / EGL 日志 + RS 每帧日志噪声 -------------------------------
++    {
++        echo
++        echo "--- F5 Mesa / EGL logs + RS per-frame log noise counters ---"
++        echo "--- hilog: MESA-OHOS ---"
++        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a "MESA-OHOS" | head -120
++        echo "--- mesa log files ---"
++        for f in /data/service/el0/render_service/mesa_ohos.log \
++                 /data/service/el1/public/render_service/mesa_ohos.log \
++                 /data/local/shader_cache/local/system/render_service/mesa_ohos.log \
++                 /data/local/tmp/mesa_ohos.log \
++                 /tmp/mesa_ohos.log /data/mesa_dbg.txt; do
++            if [ -f "$f" ]; then
++                echo "== $f ($(wc -c < "$f" 2>/dev/null) B) =="
++                head -c 60000 "$f" 2>/dev/null
++                echo
++            fi
++        done
++        echo "--- hilog: EGL / GL / dri / swrast / iris / gallium ---"
++        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
++            | grep -aiE "egl|gles|OpenGL|dri2|swrast|iris|virgl|gallium|GL_RENDERER" | tail -150
++        echo
++        echo "--- hilog: RS per-frame log noise counters (whole ring buffer) ---"
++        for pat in "DrawCommSurfaceWatermark" "set color space fail" \
++                   "SetMetadata Failed" "Animation finish callback is not executed" \
++                   "DealWithSurfaceRotationAndGravity"; do
++            echo "  count('$pat') = $(timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac "$pat")"
++        done
++    } >> "$W/F_perf.txt" 2>&1
++}
++
++# =============================================================================
+ # E. 系统 / System
+ # =============================================================================
+ sec_system() {
+@@ -590,6 +780,7 @@
+ want bluetooth  && sec_bluetooth
+ want audio      && sec_audio
+ want ime        && sec_ime
++want perf       && sec_perf
+ want system     && sec_system
+ 
+ # manifest of what was captured / what failed

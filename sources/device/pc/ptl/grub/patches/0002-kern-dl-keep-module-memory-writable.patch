@@ -1,0 +1,45 @@
+From: OpenHarmony PC team
+Subject: [PATCH] kern/dl: keep loaded modules writable on EFI
+
+GRUB 2.14 programs the memory attributes of a loaded module from its ELF
+sections, but only for the sections that are covered by a GRUB DL segment.
+Sections that are not covered - the .bss of the "relocator" module - keep
+the attributes the firmware gave us, which is read-only on x86-64 EFI.
+
+The relocator stores its boot state (grub_relocator64_rax and friends) in
+.bss, so writing it faults with #PF (page present, write) and the legacy
+x86-64 EFI kernel loader dies with
+
+    !!!! X64 Exception Type - 0E(#PF - Page-Fault) !!
+
+before the kernel is entered.  This GRUB is only used to boot OpenHarmony,
+so skip the attribute programming and keep module memory writable.
+
+Signed-off-by: OpenHarmony PC team
+---
+--- a/grub-core/kern/dl.c
++++ b/grub-core/kern/dl.c
+@@ -654,6 +654,23 @@
+   const Elf_Shdr *s;
+   const Elf_Ehdr *e = ehdr;
+   grub_err_t err;
++
++  /* OHOS: keep loaded modules writable.
++   *
++   * GRUB 2.14 derives the memory attributes of a module from its ELF
++   * sections, but only for sections that match a GRUB DL segment.  A section
++   * that is not covered by any segment - this is the case for the .bss of the
++   * "relocator" module - keeps whatever attributes the firmware handed us,
++   * which is read-only on x86-64 EFI.
++   *
++   * The relocator keeps its boot state (grub_relocator64_rax and friends) in
++   * .bss, so writing it faults with #PF (page present, write) and the legacy
++   * x86-64 EFI kernel loader dies with
++   *   "X64 Exception Type - 0E(#PF - Page-Fault)" before the kernel is even
++   * entered.  This GRUB is only used to boot OpenHarmony, so keep every
++   * module memory writable and skip the attribute programming entirely.
++   */
++  return GRUB_ERR_NONE;
+ #if !defined (__i386__) && !defined (__x86_64__) && !defined(__riscv) && \
+   !defined (__loongarch__)
+   grub_size_t arch_addralign = DL_ALIGN;

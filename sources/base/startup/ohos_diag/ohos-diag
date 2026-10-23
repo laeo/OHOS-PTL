@@ -1,0 +1,3190 @@
+#!/bin/sh
+# ohos-diag - one-command diagnostic bundle for the pc_ptl (Intel PTL) build.
+#
+#   ohos-diag                 # EVERYTHING -> <OUTDIR>/diag-<ts>.tar.gz
+#   ohos-diag quick           # fast subset (used before reboot/shutdown)
+#   ohos-diag desktop audio   # only the named sections
+#
+# The bundle always contains VERDICT.txt as its FIRST entry: a single table
+# with one row per checked item (item | expected | measured | PASS/FAIL/SKIP)
+# so the operator never has to read more than one file.
+#
+# Sections
+#   bootlog   early full kernel ring buffer (zz_dmesg_boot) + subsystem extracts
+#   fixes     verify that every already-landed fix is really in this image
+#   desktop   SceneBoard PC desktop / layout
+#   bluetooth BT stack, HDI host service, vendor HAL
+#   audio     ALSA cards / SOF / mixer / playback
+#   audiotest DESTRUCTIVE: stops audio_host and plays a tone on the hardware
+#             PCM (hw:0,0) to tell "kernel path broken" from "framework broken"
+#   wifi      link layer, regulatory domain, power save, segmented download
+#   media     ArkWeb engine / video decode / media processes
+#   ime       input method
+#   perf      graphics backend / CPU / DRM / Mesa
+#   system    general system state, full hilog + dmesg
+#   hwdec     oneVPL / VA-API / iHD hardware video decode probe result
+#
+# Output dir resolution (persistent first):
+#   /ohoslog      p6 (real userdata) mounted by part_init - survives power loss
+#   /data/local/tmp   fallback (tmpfs when DATA=tmpfs, lost on reboot)
+#
+# Every section is individually fault-tolerant and hard-timeout bounded so a
+# hung USB disk / wedged service can never make the tool hang.
+PATH=/system/bin:/vendor/bin:/bin:/usr/bin:/sbin:/usr/sbin
+export PATH
+LC_ALL=C
+export LC_ALL
+
+TS=$(date '+%Y%m%d-%H%M%S' 2>/dev/null)
+[ -n "$TS" ] || TS="notime"
+
+# ---- output dir -------------------------------------------------------------
+# Priority (first writable wins):
+#   /ohoslog          p6 mounted by part_init - the real persistent log store
+#                     (only exists in the GRUB "DATA=tmpfs" boot mode)
+#   /sys_prod/ohos-diag  separate ext4 partition (p4, rw, ~60 MiB free).  This is
+#                     the only store that survives BOTH a power loss AND an
+#                     OHOS poweroff, because poweroff *wipes* /data (userdata p6).
+#   /data/ohos-diag   persistent across a plain reboot, but wiped on poweroff
+#   /data/local/tmp   volatile - boot cleanup deletes it, last resort only
+for cand in /ohoslog /sys_prod /data; do
+    [ -d "$cand" ] || continue
+    if [ "$cand" = /sys_prod ] || [ "$cand" = /data ]; then
+        d=$cand/ohos-diag
+        mkdir -p "$d" 2>/dev/null
+    else
+        d=$cand
+    fi
+    if [ -d "$d" ] && [ -w "$d" ]; then
+        OUTDIR=$d
+        break
+    fi
+done
+[ -n "${OUTDIR:-}" ] || OUTDIR=/tmp
+mkdir -p "$OUTDIR" 2>/dev/null
+
+# keep only the newest KEEP_N archives so a tiny partition can never fill up
+# (p4 /sys_prod is only ~60 MiB on this product)
+KEEP_N=3
+
+# ---- the run lock -----------------------------------------------------------
+# The boot service (zz_diag_boot.sh) fires ohos-diag ~240 s after boot, so a
+# manual run can collide with it.  Without a lock the two runs delete each
+# other's scratch directory and both end up with an empty bundle.
+LOCK="$OUTDIR/.ohos-diag.lock"
+if mkdir "$LOCK" 2>/dev/null; then
+    echo $$ > "$LOCK/pid" 2>/dev/null
+    trap 'rm -rf "$LOCK" 2>/dev/null' EXIT INT TERM HUP
+else
+    _lpid=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ -n "$_lpid" ] && kill -0 "$_lpid" 2>/dev/null; then
+        echo "ohos-diag: another instance is already running (pid $_lpid) - nothing to do"
+        exit 0
+    fi
+    # a stale lock (the owner died / the power was cut) -> take it over
+    rm -rf "$LOCK" 2>/dev/null
+    if mkdir "$LOCK" 2>/dev/null; then
+        echo $$ > "$LOCK/pid" 2>/dev/null
+        trap 'rm -rf "$LOCK" 2>/dev/null' EXIT INT TERM HUP
+    fi
+    # if the lock still cannot be taken we rather run without it than not run
+fi
+
+W=$(mktemp -d "$OUTDIR/.diag.XXXXXX" 2>/dev/null)
+if [ -z "$W" ] || [ ! -d "$W" ]; then
+    W="$OUTDIR/.diag.$$"
+    mkdir -p "$W" 2>/dev/null
+fi
+# the owner marker: the cleanup below must never delete the scratch dir of a
+# live run (that is exactly what broke the concurrent runs)
+echo $$ > "$W/.owner" 2>/dev/null
+
+# A dump that was killed by a reboot (the pre-reboot hook runs right before the
+# syscall) can leave its scratch dir behind.  Drop every stale one now - but
+# never one that belongs to a running instance.
+for old in "$OUTDIR"/.diag.*; do
+    [ -d "$old" ] || continue
+    [ "$old" = "$W" ] && continue
+    _op=$(cat "$old/.owner" 2>/dev/null)
+    if [ -n "$_op" ] && kill -0 "$_op" 2>/dev/null; then
+        echo "ohos-diag: keeping the scratch dir of the live run $_op: $old"
+        continue
+    fi
+    rm -rf "$old" 2>/dev/null
+done
+
+TAG=$TS
+case "$1" in
+    quick) TAG="$TS-quick" ;;
+esac
+ARCHIVE="$OUTDIR/diag-$TAG.tar.gz"
+
+# the verdict file lives in the work dir and is copied into the bundle
+VERDICT="$W/_verdict.txt"
+: > "$VERDICT" 2>/dev/null
+# machine readable twin of the verdict: "STATUS|NAME|DETAIL" per line.
+# Used by the table builder so that a check can be looked up by its exact key
+# (no regex, no padding games).
+VERDICT_TSV="$W/_verdict.tsv"
+: > "$VERDICT_TSV" 2>/dev/null
+
+# ---- knobs ------------------------------------------------------------------
+# per-command timeout in seconds
+if [ "$1" = "quick" ]; then
+    T_CMD=6
+    T_HILOG=6
+    MAX_HILOG=3000
+    KEEP_HILOG_RAW=0
+else
+    T_CMD=20
+    T_HILOG=20
+    MAX_HILOG=200000
+    KEEP_HILOG_RAW=1
+fi
+
+SECTIONS="$*"
+[ -n "$SECTIONS" ] || SECTIONS="bootlog fixes desktop bluetooth audio wifi media ime system perf hwdec"
+[ "$SECTIONS" = "quick" ] && SECTIONS="bootlog fixes desktop bluetooth audio media ime system perf hwdec"
+
+want() {
+    for s in $SECTIONS; do
+        [ "$s" = "$1" ] && return 0
+    done
+    return 1
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# The device has NO 'tr' and NO 'awk' (toybox + mksh only).  oneline() joins
+# all lines of its input into a single line, which is what 'tr "\n" " "' did.
+oneline() {
+    sed ':a;N;$!ba;s/\n/ /g' 2>/dev/null
+}
+
+# =============================================================================
+# verdict framework
+# =============================================================================
+# Every check emits exactly one line into _verdict.txt:
+#     <PASS|FAIL|WARN|SKIP>  <check name>  <detail>
+# The file is printed in the bundle header so that the operator immediately
+# sees the state of the four open issues (audio / bluetooth / wifi / video)
+# without having to read any of the raw sections.
+# (VERDICT itself is set above, right after the work dir was created.)
+V_PASS=0; V_FAIL=0; V_WARN=0; V_SKIP=0
+
+v() {
+    _st=$1; _n=$2; shift 2
+    [ -n "$VERDICT" ] || return 0
+    case "$_st" in
+        PASS) V_PASS=$((V_PASS + 1)) ;;
+        FAIL) V_FAIL=$((V_FAIL + 1)) ;;
+        WARN) V_WARN=$((V_WARN + 1)) ;;
+        *)    V_SKIP=$((V_SKIP + 1)) ;;
+    esac
+    printf '%-5s %-56s %s\n' "$_st" "$_n" "$*" >> "$VERDICT" 2>/dev/null
+    # machine readable twin: STATUS|NAME|DETAIL (the detail may contain '|',
+    # so only the first two separators are meaningful)
+    printf '%s|%s|%s\n' "$_st" "$_n" "$*" >> "$VERDICT_TSV" 2>/dev/null
+}
+
+# vlookup <key>  ->  sets VLOOK_ST (status) and VLOOK_DT (detail)
+#
+# NOTE: the result is returned in two globals instead of one "STATUS|DETAIL"
+# string, because the device shell (mksh) mis-parses a '|' inside a parameter
+# expansion pattern ("${row%%|*}" does not mean what it looks like there).
+VLOOK_ST=""
+VLOOK_DT=""
+vlookup() {
+    _vk=$1
+    VLOOK_ST=""
+    VLOOK_DT=""
+    [ -r "$VERDICT_TSV" ] || return 0
+    while IFS='|' read -r _s _n _d; do
+        if [ "$_n" = "$_vk" ]; then
+            VLOOK_ST=$_s
+            VLOOK_DT=$_d
+            return 0
+        fi
+    done < "$VERDICT_TSV"
+    return 0
+}
+
+# vgrep <PASS|FAIL|WARN|SKIP> <name> <file> <pattern>
+#   PASS when the pattern is found at least once, FAIL otherwise.
+#   The pattern is an EXTENDED regular expression: the toybox grep on the
+#   device does not understand the BRE alternation '\|' (it would look for
+#   a literal '|'), so 'a|b' is the correct spelling here.
+vgrep() {
+    _st=$1; _n=$2; _f=$3; _pat=$4
+    if [ -r "$_f" ]; then
+        _c=$(grep -aEc "$_pat" "$_f" 2>/dev/null)
+        case "$_c" in ''|*[!0-9]*) _c=0 ;; esac
+        if [ "$_c" -gt 0 ]; then
+            v PASS "$_n" "matched x$_c ($_pat)"
+        else
+            v FAIL "$_n" "no match for '$_pat' in $_f"
+        fi
+    else
+        v SKIP "$_n" "file not present: $_f"
+    fi
+}
+
+# vfile <PASS|FAIL|WARN|SKIP> <name> <path> [min_bytes]
+vfile() {
+    _st=$1; _n=$2; _p=$3; _min=${4:-1}
+    if [ -e "$_p" ]; then
+        _sz=$(wc -c < "$_p" 2>/dev/null)
+        case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+        if [ "$_sz" -ge "$_min" ]; then
+            v PASS "$_n" "$_p (${_sz} B)"
+        else
+            v FAIL "$_n" "$_p is too small (${_sz} B < $_min)"
+        fi
+    else
+        v FAIL "$_n" "missing: $_p"
+    fi
+}
+
+# run <outfile> <timeout> <cmd...>   -> never fails the caller, never hangs
+run() {
+    _out=$1; shift
+    _t=$1; shift
+    {
+        echo "\$ $*"
+    } >> "$W/_commands.log" 2>/dev/null
+    if have timeout; then
+        timeout "$_t" "$@" >> "$_out" 2>&1
+    else
+        "$@" >> "$_out" 2>&1
+    fi
+    _rc=$?
+    echo "[rc=$_rc] $*" >> "$W/_commands.log" 2>/dev/null
+    return 0
+}
+
+# runsh <outfile> <timeout> <shell-command-string>
+runsh() {
+    _out=$1; shift
+    _t=$1; shift
+    echo "\$ sh -c $*" >> "$W/_commands.log" 2>/dev/null
+    if have timeout; then
+        timeout "$_t" sh -c "$*" >> "$_out" 2>&1
+    else
+        sh -c "$*" >> "$_out" 2>&1
+    fi
+    _rc=$?
+    echo "[rc=$_rc] sh -c $*" >> "$W/_commands.log" 2>/dev/null
+    return 0
+}
+
+hdr() {
+    _f="$W/$1"
+    shift
+    {
+        echo "===== $* ====="
+        echo "----- host: $(uname -a 2>/dev/null) -----"
+        echo "----- uptime: $(cut -d. -f1 /proc/uptime 2>/dev/null)s  time: $(date 2>/dev/null) -----"
+        echo
+    } > "$_f" 2>/dev/null
+}
+
+banner() {
+    echo "ohos-diag: section $1 ..."
+}
+
+# =============================================================================
+# BOOTLOG - the early, FULL kernel ring buffer
+# =============================================================================
+# zz_dmesg_boot (init service, start-mode "boot") dumps the complete ring
+# buffer to /sys_prod/dmesg_boot_t0.log etc. right after the pre-init mount
+# stage, i.e. long before the drivers' probe messages can be pushed out of
+# the ring buffer.  This section collects those files - they are the primary
+# evidence for "no audio card" / "bluetooth does not open" / "wifi is slow".
+sec_bootlog() {
+    banner BOOTLOG
+    hdr B_bootlog.txt "BOOTLOG - EARLY FULL KERNEL RING BUFFER"
+
+    _bootdirs="/sys_prod /data /ohoslog/ptl-log /data/local/tmp"
+
+    {
+        echo "--- candidate locations ---"
+        for _d in $_bootdirs; do
+            [ -d "$_d" ] || continue
+            echo "== $_d"
+            ls -la "$_d"/dmesg_boot* 2>/dev/null || echo "   (no dmesg_boot* files)"
+        done
+        echo
+        echo "--- legacy part_init capture (DATA=tmpfs boot mode only) ---"
+        for _f in /ohoslog/ptl-log/dmesg.boot.log /ohoslog/ptl-log/part_init.txt \
+                  /ohoslog/ptl-log/boot_heartbeat.txt; do
+            if [ -f "$_f" ]; then
+                echo "=== $_f ($(wc -c < "$_f") B) ==="
+                head -c 20000 "$_f"
+                echo
+            else
+                echo "(absent) $_f"
+            fi
+        done
+    } >> "$W/B_bootlog.txt" 2>&1
+
+    # --- copy the earliest snapshot + the subsystem extracts into the bundle ---
+    _found=0
+    for _d in $_bootdirs; do
+        for _f in "$_d"/dmesg_boot_t0.log "$_d"/dmesg_boot_subsystems.log \
+                  "$_d"/dmesg_boot_meta.txt "$_d"/dmesg_boot_index.txt \
+                  "$_d"/dmesg_boot_t15.log "$_d"/dmesg_boot_t60.log \
+                  "$_d"/dmesg_boot_t180.log "$_d"/dmesg_boot_t300.log; do
+            [ -f "$_f" ] || continue
+            _b=$(basename "$_f")
+            case "$_b" in
+                dmesg_boot_t0.log|dmesg_boot_subsystems.log|dmesg_boot_meta.txt|dmesg_boot_index.txt)
+                    cp -f "$_f" "$W/B_$_b" 2>/dev/null && _found=1 ;;
+            esac
+        done
+        break
+    done
+
+    {
+        echo
+        echo "--- the early snapshot itself (first 2000 lines) ---"
+        if [ -f "$W/B_dmesg_boot_t0.log" ]; then
+            head -n 2000 "$W/B_dmesg_boot_t0.log"
+        else
+            echo "(NO dmesg_boot_t0.log -- the zz_dmesg_boot service did not run!)"
+        fi
+        echo
+        echo "--- subsystem extract ---"
+        if [ -f "$W/B_dmesg_boot_subsystems.log" ]; then
+            cat "$W/B_dmesg_boot_subsystems.log"
+        else
+            echo "(NO dmesg_boot_subsystems.log)"
+        fi
+    } >> "$W/B_bootlog.txt" 2>&1
+
+    # --- how complete is the capture? ----------------------------------------
+    # The kernel ring buffer is finite (log_buf_len).  If the first timestamp
+    # of the capture is already at e.g. 40 s, the boot-time probe messages
+    # (SOF / btintel / iwlwifi / xe) have been overwritten and the capture is
+    # useless for the four open issues.
+    {
+        echo
+        echo "--- ring buffer size and the time window of the capture ---"
+        _lb=$(cat /proc/sys/kernel/log_buf_len 2>/dev/null)
+        [ -n "$_lb" ] || _lb="(fixed by CONFIG_LOG_BUF_SHIFT - no sysctl)"
+        echo "log_buf_len          = $_lb"
+        if [ -f "$W/B_dmesg_boot_t0.log" ]; then
+            _ft=$(sed -n 's/^\[ *\([0-9][0-9]*\)\.[0-9][0-9]*\].*/\1/p' "$W/B_dmesg_boot_t0.log" 2>/dev/null | head -1)
+            _lt=$(sed -n 's/^\[ *\([0-9][0-9]*\)\.[0-9][0-9]*\].*/\1/p' "$W/B_dmesg_boot_t0.log" 2>/dev/null | tail -1)
+            echo "first timestamp (s)  = ${_ft:-?}"
+            echo "last  timestamp (s)  = ${_lt:-?}"
+            echo "-> the capture covers ${_ft:-?}s .. ${_lt:-?}s of uptime"
+        fi
+    } >> "$W/B_bootlog.txt" 2>&1
+
+    # --- verdicts -------------------------------------------------------------
+    if [ -f "$W/B_dmesg_boot_t0.log" ]; then
+        v PASS "bootlog/early-dmesg-captured" "dmesg_boot_t0.log present ($(wc -c < "$W/B_dmesg_boot_t0.log") B)"
+    else
+        v FAIL "bootlog/early-dmesg-captured" "no dmesg_boot_t0.log anywhere - zz_dmesg_boot did not run"
+    fi
+    if [ -f "$W/B_dmesg_boot_t0.log" ]; then
+        vgrep PASS "bootlog/sof-hda-in-boot-dmesg" "$W/B_dmesg_boot_t0.log" 'sof|hda|snd|asoc'
+        vgrep PASS "bootlog/bluetooth-in-boot-dmesg" "$W/B_dmesg_boot_t0.log" 'bluetooth|btintel|hci'
+        vgrep PASS "bootlog/iwlwifi-in-boot-dmesg" "$W/B_dmesg_boot_t0.log" 'iwlwifi|cfg80211'
+        vgrep PASS "bootlog/gpu-in-boot-dmesg" "$W/B_dmesg_boot_t0.log" 'xe|drm|i915'
+        # the capture is only useful if it starts within the first seconds
+        _ft=$(sed -n 's/^\[ *\([0-9][0-9]*\)\.[0-9][0-9]*\].*/\1/p' "$W/B_dmesg_boot_t0.log" 2>/dev/null | head -1)
+        case "$_ft" in
+            ''|*[!0-9]*) v WARN "bootlog/capture-window" "cannot determine the first timestamp" ;;
+            *)
+                if [ "$_ft" -le 15 ]; then
+                    v PASS "bootlog/capture-window" "the capture starts at ${_ft}s - the boot-time probe messages are in it"
+                else
+                    v FAIL "bootlog/capture-window" "the capture only starts at ${_ft}s - the ring buffer had already wrapped (log_buf_len too small?)"
+                fi ;;
+        esac
+    fi
+}
+
+# =============================================================================
+# FIXES - is every already-landed fix really in THIS image?
+# =============================================================================
+# The manifest is generated by fix_diag2/inject.sh at injection time and lists
+#   <path>|<sha256>|<fix id>|<what it does>|<runtime criterion>
+# one entry per line.  We re-hash the file on the live device and compare.
+sec_fixes() {
+    banner FIXES
+    hdr C_fixes.txt "FIXES - VERIFICATION OF THE ALREADY-LANDED FIXES"
+
+    _mf=""
+    for _m in /system/etc/ohos-diag/fix_manifest.txt /vendor/etc/ohos-diag/fix_manifest.txt \
+              /data/etc/ohos-diag/fix_manifest.txt; do
+        [ -f "$_m" ] && { _mf=$_m; break; }
+    done
+
+    {
+        echo "--- manifest: ${_mf:-NOT FOUND} ---"
+        if [ -z "$_mf" ]; then
+            echo "(no manifest -> this image was not built by fix_diag2/inject.sh)"
+        else
+            cat "$_mf"
+        fi
+        echo
+        echo "--- live verification ---"
+        printf '%-6s %-58s %-12s %s\n' "STATE" "PATH" "SIZE" "FIX-ID"
+        _fx_total=0; _fx_bad=0; _fx_ok=0
+        if [ -n "$_mf" ]; then
+            while IFS='|' read -r _p _sha _id _desc _crit; do
+                case "$_p" in ''|'#'*) continue ;; esac
+                _fx_total=$((_fx_total + 1))
+                _p=$(echo "$_p" | sed -e 's/^ *//' -e 's/ *$//')
+                _sha=$(echo "$_sha" | sed -e 's/^ *//' -e 's/ *$//')
+                _id=$(echo "$_id" | sed -e 's/^ *//' -e 's/ *$//')
+                _desc=$(echo "$_desc" | sed -e 's/^ *//' -e 's/ *$//')
+                _crit=$(echo "$_crit" | sed -e 's/^ *//' -e 's/ *$//')
+                if [ ! -e "$_p" ]; then
+                    printf '%-6s %-58s %-12s %s\n' "MISS" "$_p" "-" "$_id"
+                    v FAIL "fix/$_id" "missing: $_p"
+                    _fx_bad=$((_fx_bad + 1))
+                    continue
+                fi
+                _sz=$(wc -c < "$_p" 2>/dev/null)
+                case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+                if [ -z "$_sha" ] || [ "$_sha" = "-" ]; then
+                    printf '%-6s %-58s %-12s %s\n' "INFO" "$_p" "$_sz" "$_id"
+                    v WARN "fix/$_id" "present but no sha in manifest ($_sz B)"
+                    continue
+                fi
+                _now=$(sha256sum "$_p" 2>/dev/null | cut -d' ' -f1)
+                if [ "$_now" = "$_sha" ]; then
+                    printf '%-6s %-58s %-12s %s\n' "OK" "$_p" "$_sz" "$_id"
+                    v PASS "fix/$_id" "$_p sha256 matches"
+                    _fx_ok=$((_fx_ok + 1))
+                else
+                    printf '%-6s %-58s %-12s %s\n' "DIFF" "$_p" "$_sz" "$_id"
+                    echo "      expected $_sha"
+                    echo "      actual   $_now"
+                    v FAIL "fix/$_id" "$_p sha256 MISMATCH"
+                    _fx_bad=$((_fx_bad + 1))
+                fi
+                [ -n "$_desc" ] && echo "      what : $_desc"
+                [ -n "$_crit" ] && echo "      check: $_crit"
+            done < "$_mf"
+        fi
+        if [ -n "$_mf" ]; then
+            v PASS "fixes/manifest-present" "$_mf"
+        else
+            v SKIP "fixes/manifest-present" "no fix manifest in this image"
+        fi
+        if [ "$_fx_total" -gt 0 ]; then
+            if [ "$_fx_bad" -eq 0 ]; then
+                v PASS "fixes/all-match" "all $_fx_total fixes match their sha256"
+            else
+                v FAIL "fixes/all-match" "$_fx_bad of $_fx_total fixes do NOT match their sha256"
+            fi
+        else
+            v SKIP "fixes/all-match" "the manifest is empty (no fixes listed)"
+        fi
+        echo
+        echo "--- init services that carry the fixes ---"
+        for _c in /system/etc/init/zz_dmesg_boot.cfg /system/etc/init/zz_hilog_persist.cfg \
+                  /system/etc/init/zz_diag.cfg /system/etc/init/zz_perf.cfg \
+                  /system/etc/init/zz_sof_reprobe.cfg /system/etc/init/zz_wifi_regdomain.cfg \
+                  /system/etc/init/console.cfg; do
+            if [ -f "$_c" ]; then
+                echo "=== $_c"
+                cat "$_c"
+                echo
+            else
+                echo "(absent) $_c"
+            fi
+        done
+    } >> "$W/C_fixes.txt" 2>&1
+}
+
+# =============================================================================
+# A. 桌面 / Desktop (SceneBoard PC)
+# =============================================================================
+sec_desktop() {
+    banner A/desktop
+    hdr A_desktop.txt "A. DESKTOP / SceneBoard"
+
+    # A1 taskpool health (A:3 R:3 I:0 is the *stuck* signature)
+    {
+        echo "--- hilog: taskpool ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a 'taskpool::' | tail -n 120
+        echo
+        echo "--- count: 'taskpool::Task is pending' ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'taskpool::Task is pending'
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A2 AppModel / desktop layout cache from hilog
+    {
+        echo
+        echo "--- hilog: AppModel / DesktopLayoutCacheData / gridItemList ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aE 'AppModel:|DesktopLayoutCacheData|gridItemList|currentBundleInfoList|PcPageDesktopLayoutConfig|loadPersistConfig|dealNotInCCMApp|updateGridConfig|loadLayoutInfoFromConfig|A01b01/HOME|A01c03/LM' \
+            | tail -n 200
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A3 SceneBoard process state
+    {
+        echo
+        echo "--- ps: sceneboard / launcher / appspawn ---"
+        ps -A 2>/dev/null | grep -aE 'sceneboard|launcher|appspawn|render_service|foundation' || echo "(none)"
+        echo
+        echo "--- pidof ---"
+        pidof com.ohos.sceneboard 2>/dev/null || echo "(sceneboard not running)"
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A4 launcher/sceneboard RDB: tables + gridlayout_info row count + rows
+    mkdir -p "$W/A_desktop_rdb" 2>/dev/null
+    {
+        echo "--- RDB dumps ---"
+        for db in /data/app/el1/*/database/com.ohos.sceneboard/*/rdb/*.db \
+                  /data/app/el2/*/database/com.ohos.sceneboard/*/rdb/*.db \
+                  /data/app/el1/*/database/com.ohos.sceneboard/rdb/*.db \
+                  /data/app/el2/*/database/com.ohos.sceneboard/rdb/*.db \
+                  /data/app/el1/100/base/com.ohos.sceneboard/haps/*/files/*/rdb/*.db \
+                  /data/app/el1/bundle/public/com.ohos.sceneboard/*/rdb/*.db \
+                  /data/app/el2/*/bundle/public/com.ohos.sceneboard/*/rdb/*.db \
+                  /data/app/el1/*/database/com.ohos.launcher/*/rdb/*.db \
+                  /data/app/el2/*/database/com.ohos.launcher/*/rdb/*.db \
+                  /data/app/el1/bundle/public/com.ohos.launcher/*/databases/*.db \
+                  /data/app/el2/*/bundle/public/com.ohos.launcher/*/databases/*.db; do
+            [ -f "$db" ] || continue
+            b=$(echo "$db" | sed 's|/|_|g')
+            echo "=== $db (size=$(wc -c < "$db" 2>/dev/null)) ==="
+            if have sqlite3; then
+                {
+                    echo "--- .tables ---"
+                    sqlite3 "$db" '.tables' 2>&1
+                    for t in gridlayout_info pc_mode_gridlayout_info app_center_layout_info \
+                             dock_menu_task grid_item_info; do
+                        echo "--- count($t) ---"
+                        sqlite3 "$db" "select count(*) from $t;" 2>&1
+                        echo "--- rows($t) ---"
+                        sqlite3 -readonly "$db" "select * from $t limit 200;" 2>&1
+                    done
+                    # fix_desktop2: 桌面项的 area(width/height) 必须是 1x1，
+                    # 否则 PageDesktopViewModel.filterItemExceedCurrentScreen()
+                    # 会把桌面项整批过滤掉（桌面 0 图标，应用中心/dock 却正常）。
+                    echo "--- count(gridlayout_info_desktop) ---"
+                    sqlite3 "$db" "select count(*) from gridlayout_info where container=-100;" 2>&1
+                    echo "--- count(gridlayout_info_desktop_null_area) ---"
+                    sqlite3 "$db" "select count(*) from gridlayout_info where container=-100 and (width is null or height is null);" 2>&1
+                    echo "--- count(pc_mode_gridlayout_info_desktop) ---"
+                    sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100;" 2>&1
+                    echo "--- count(pc_mode_gridlayout_info_desktop_null_area) ---"
+                    sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100 and (width is null or height is null);" 2>&1
+                    # fix_desktop2: 桌面项的 page_index 不能是 NULL ——
+                    # PageDesktopViewModel.integrateSwiper() 里
+                    #   "if (mPage === undefined || mPage < 0 || ...) { logError } else { push }"
+                    # 没有 page 的元素不会被放进任何一页 -> 桌面页一个图标都不显示。
+                    echo "--- count(gridlayout_info_desktop_null_page) ---"
+                    sqlite3 "$db" "select count(*) from gridlayout_info where container=-100 and page_index is null;" 2>&1
+                    echo "--- count(pc_mode_gridlayout_info_desktop_null_page) ---"
+                    sqlite3 "$db" "select count(*) from pc_mode_gridlayout_info where container=-100 and page_index is null;" 2>&1
+                } > "$W/A_desktop_rdb/$b.txt" 2>&1
+                cat "$W/A_desktop_rdb/$b.txt" >> "$W/A_desktop.txt" 2>&1
+                # also copy the raw db so it can be opened offline
+                cp -f "$db" "$W/A_desktop_rdb/$b" 2>/dev/null
+            else
+                echo "(no sqlite3 on device)"
+            fi
+            echo
+        done
+        [ -f "$W/A_desktop.txt" ] && grep -qa '=== /' "$W/A_desktop.txt" || echo "(no RDB found)"
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A4b fix_desktop2: 桌面图标自证日志（渲染数量 / 过滤丢弃数 / 布局来源）
+    {
+        echo
+        echo "--- fix_desktop2: DESKTOP* self-proof log lines ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -aE 'DESKTOPICONS|DESKTOPFILTER|DESKTOPLAYOUT' | tail -n 60
+        echo
+        echo "--- count(DESKTOPICONS) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'DESKTOPICONS'
+        echo "--- count(DESKTOPFILTER) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'DESKTOPFILTER'
+        echo
+        echo "--- fix_desktop2: SceneBoard integrateSwiper errors (items without a page are dropped) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a 'integrateSwiper page:' | tail -n 10
+        echo "--- count(integrateSwiper) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'integrateSwiper page:'
+        echo
+        echo "--- preset layoutInfo.json area check (every desktop item must have area) ---"
+        for f in /data/app/el1/*/base/com.ohos.sceneboard/haps/*/resources/rawfile/layoutInfo.json \
+                 /system/app/SceneBoard/*/resources/rawfile/layoutInfo.json; do
+            [ -f "$f" ] || continue
+            echo "=== $f ==="
+            if have sqlite3; then :; fi
+            grep -o '"area"' "$f" 2>/dev/null | wc -l
+        done
+        echo "--- items without area in the preset layout (should be 0) ---"
+        for f in /data/app/el1/*/base/com.ohos.sceneboard/haps/*/resources/rawfile/layoutInfo.json \
+                 /system/app/SceneBoard/*/resources/rawfile/layoutInfo.json; do
+            [ -f "$f" ] || continue
+            grep -o '"bundleName"' "$f" 2>/dev/null | wc -l
+        done
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A5 layoutInfo rawfile - the desktop icon layout source
+    {
+        echo
+        echo "--- layoutInfo rawfile (HAP + extracted copies) ---"
+        n=0
+        for f in /system/app/SceneBoard/*/resources/rawfile/layoutInfo.json \
+                 /system/app/*SceneBoard*/resources/rawfile/layoutInfo.json \
+                 /data/app/el1/*/base/com.ohos.sceneboard/haps/*/files/GridLayoutInfo*.json \
+                 /data/app/el1/*/base/com.ohos.sceneboard/haps/*/files/layoutInfo*.json \
+                 /data/app/el1/*/base/com.ohos.sceneboard/haps/*/files/*LayoutInfo*.json \
+                 /data/app/el1/bundle/public/com.ohos.sceneboard/*/haps/*/files/layoutInfo.json \
+                 /data/app/el2/*/bundle/public/com.ohos.sceneboard/*/haps/*/files/layoutInfo.json; do
+            [ -f "$f" ] || continue
+            n=$((n + 1))
+            echo "=== $f size=$(wc -c < "$f") sha=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1) ==="
+            head -c 20000 "$f"
+            echo
+        done
+        [ "$n" = 0 ] && echo "(layoutInfo.json not found)"
+        echo
+        echo "--- RDB of sceneboard seen through pid1 root (namespace-proof) ---"
+        for d in /proc/1/root/data/app/el2/100/database/rdb \
+                 /proc/1/root/data/app/el1/bundle/public/com.ohos.sceneboard; do
+            echo "== $d"; ls -la "$d" 2>&1 | head -20
+        done
+        echo "--- gridlayout rows seen through pid1 root ---"
+        for f in /proc/1/root/data/storage/el2/100/database/rdb/entry.rdb; do
+            [ -e "$f" ] && echo "rdb present: $f ($(wc -c < "$f") B)" || echo "rdb absent: $f"
+        done
+        echo "--- sceneboard desktop layout hilog via full ring (no grep) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac 'gridlayout_info'
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a 'gridlayout_info' | tail -3
+        echo
+        echo "--- full system-ability list (hidumper -ls) ---"
+        timeout_cmd 30 hidumper -ls 2>&1 | head -40
+        echo "--- bluetooth_host / bluetooth HDI presence ---"
+        timeout_cmd 30 hidumper -ls 2>&1 | grep -aio 'bluetooth[^ ]*' | head
+        echo
+        echo "--- any rawfile under SceneBoard haps dirs ---"
+        find /data/app/el1/*/base/com.ohos.sceneboard -name 'GridLayoutInfo*' 2>/dev/null | head -20
+        find /data/app/el1/*/base/com.ohos.sceneboard -name 'layoutInfo*' 2>/dev/null | head -20
+        find /data/app/el1/*/database/com.ohos.sceneboard -name '*.db' 2>/dev/null | head -20
+        find /system/app -name 'layoutInfo*' 2>/dev/null | head -20
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A6 sceneboard faultlog / crash files
+    {
+        echo
+        echo "--- SceneBoard faultlog / crash ---"
+        ls -la /data/log/faultlog/faultlogger/*/com.ohos.sceneboard* 2>/dev/null || echo "(none)"
+        find /data/log -iname '*sceneboard*' 2>/dev/null | head -40
+        echo "--- hilog: sceneboard jscrash / FATAL ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -aiE 'sceneboard.*(crash|fatal|exception)|jscrash' | tail -60
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # A7 window / display manager dump
+    {
+        echo
+        echo "--- hidumper windows (see A_hidumper_*.txt) ---"
+        runsh "$W/A_hidumper_wms.txt" "$T_CMD" 'hidumper -s WindowManagerService 2>&1 | head -400'
+        runsh "$W/A_hidumper_sms.txt" "$T_CMD" 'hidumper -s 4606 2>&1 | head -400'
+        runsh "$W/A_hidumper_rs.txt" "$T_CMD" 'hidumper -s RenderService -a screen 2>&1 | head -200'
+        echo "(see A_hidumper_*.txt)"
+        # fix_desktop2: RS 节点树里桌面图标节点的数量（最硬的判据：
+        # 图标真的在屏幕上 => RS 树里有 SwiperPage_AppItem_* 节点）
+        echo
+        echo "--- RS tree: desktop icon nodes (SwiperPage_AppItem_*) ---"
+        _rs_nodes=$(timeout_cmd 60 hidumper -s RenderService -a RSTree 2>/dev/null | grep -ac 'SwiperPage_AppItem_')
+        echo "rs_desktop_icon_nodes=${_rs_nodes:-0}"
+        echo "--- RS tree: all _AppItem_ nodes ---"
+        _rs_all=$(timeout_cmd 60 hidumper -s RenderService -a RSTree 2>/dev/null | grep -ac '_AppItem_')
+        echo "rs_appitem_nodes=${_rs_all:-0}"
+    } >> "$W/A_desktop.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    if [ -n "$(pidof com.ohos.sceneboard 2>/dev/null)" ]; then
+        v PASS "desktop/sceneboard-running" "pid $(pidof com.ohos.sceneboard 2>/dev/null)"
+    else
+        v FAIL "desktop/sceneboard-running" "com.ohos.sceneboard is not running"
+    fi
+
+    # the largest row count of <table> over every RDB dump we made
+    _rdbcount() {
+        _rc_t=$1; _rc_m=0
+        for _rc_f in "$W/A_desktop_rdb"/*.txt; do
+            [ -f "$_rc_f" ] || continue
+            _rc_v=$(sed -n "/^--- count($_rc_t) ---/{n;p;q;}" "$_rc_f" 2>/dev/null | cut -c1-16)
+            case "$_rc_v" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            [ "$_rc_v" -gt "$_rc_m" ] && _rc_m=$_rc_v
+        done
+        printf '%s' "$_rc_m"
+    }
+
+    if ls "$W/A_desktop_rdb"/*.txt >/dev/null 2>&1; then
+        _d_icons=$(_rdbcount gridlayout_info)
+        _d_appc=$(_rdbcount app_center_layout_info)
+        _d_pcm=$(_rdbcount pc_mode_gridlayout_info)
+        if [ "$_d_icons" -gt 0 ]; then
+            v PASS "desktop/desktop-icons" "gridlayout_info has $_d_icons rows"
+        else
+            v FAIL "desktop/desktop-icons" "gridlayout_info is empty - the PC desktop shows no icons"
+        fi
+        if [ "$_d_appc" -gt 0 ]; then
+            v PASS "desktop/app-center" "app_center_layout_info has $_d_appc rows"
+        else
+            v FAIL "desktop/app-center" "app_center_layout_info is empty"
+        fi
+        if [ "$_d_pcm" -gt 0 ]; then
+            v PASS "desktop/pc-mode-table" "pc_mode_gridlayout_info has $_d_pcm rows"
+        else
+            v WARN "desktop/pc-mode-table" "pc_mode_gridlayout_info is empty (expected unless persist.sceneboard.ispcmode=true)"
+        fi
+
+        # ---- fix_desktop2: 桌面项 area(width/height) 不能为 NULL ----
+        # area=NULL -> 读回 area=[NaN,NaN] -> DesktopItem 算出的图标坐标是 NaN，
+        # ArkUI 无法摆放 + filterItemExceedCurrentScreen() 把桌面项整批过滤
+        # -> 桌面 0 图标（应用中心/dock 却正常，因为它们的布局带 area）。
+        # PC 产品有两张表：gridlayout_info 与 pc_mode_gridlayout_info(PC_MODE_MODEL 实际读的那张)。
+        _d_desk=$(_rdbcount gridlayout_info_desktop)
+        _d_null=$(_rdbcount gridlayout_info_desktop_null_area)
+        _d_pcdesk=$(_rdbcount pc_mode_gridlayout_info_desktop)
+        _d_pcnull=$(_rdbcount pc_mode_gridlayout_info_desktop_null_area)
+        _d_ok=1
+        [ "$_d_desk" -gt 0 ] || _d_ok=0
+        [ "$_d_null" -eq 0 ] || _d_ok=0
+        if [ "$_d_pcdesk" -gt 0 ] && [ "$_d_pcnull" -ne 0 ]; then _d_ok=0; fi
+        if [ "$_d_ok" -eq 1 ]; then
+            v PASS "desktop/db-area" "grid: $_d_desk rows/$_d_null null-area, pc_mode: $_d_pcdesk rows/$_d_pcnull null-area"
+        elif [ "$_d_desk" -gt 0 ]; then
+            v FAIL "desktop/db-area" "grid: $_d_null/$_d_desk rows with NULL width/height, pc_mode: $_d_pcnull/$_d_pcdesk -> icons are not rendered"
+        else
+            v SKIP "desktop/db-area" "no desktop rows in gridlayout_info"
+        fi
+    else
+        v SKIP "desktop/desktop-icons" "no RDB dump (sqlite3 missing?)"
+        v SKIP "desktop/app-center"    "no RDB dump (sqlite3 missing?)"
+        v SKIP "desktop/pc-mode-table" "no RDB dump (sqlite3 missing?)"
+        v SKIP "desktop/db-area"       "no RDB dump (sqlite3 missing?)"
+    fi
+
+    # ---- fix_desktop2: 桌面图标自证日志 ----
+    # SceneBoard 的 hilog 标签：
+    #   DESKTOPICONS  rendered=N  —— 桌面页(SwiperPage)真正拿去渲染的图标数（权威）
+    #               layoutVisible=N/desktopIcons=N —— 布局里可见的图标数(SCBDesktop 定时打印)
+    #               areaOk=N      —— 其中 area(width/height) 合法的个数
+    #   DESKTOPFILTER kept=N dropped=N —— 过滤掉多少个越界/area 坏的项
+    #   DESKTOPLAYOUT normalizeDesktopItemArea fixed=N —— 运行时修复了多少个 area
+    _d_ren=$(grep -a 'DESKTOPICONS' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*rendered=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    _d_foc=$(grep -a 'DESKTOPICONS' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*desktopIcons=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    _d_areaok=$(grep -a 'DESKTOPICONS' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*areaOk=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    case "$_d_ren" in ''|*[!0-9]*) _d_ren=-1 ;; esac
+    case "$_d_foc" in ''|*[!0-9]*) _d_foc=-1 ;; esac
+    case "$_d_areaok" in ''|*[!0-9]*) _d_areaok=-1 ;; esac
+    if [ "$_d_ren" -gt 0 ]; then
+        v PASS "desktop/icons-rendered" "the desktop page renders $_d_ren icons (areaOk=${_d_areaok:-?}, layout=${_d_foc:-?})"
+    elif [ "$_d_ren" -lt 0 ] && [ "$_d_foc" -gt 0 ]; then
+        v WARN "desktop/icons-rendered" "no rendered= line (old SceneBoard HAP?), but the layout has $_d_foc visible icons"
+    elif [ "$_d_ren" -gt 0 ] || [ "$_d_foc" -gt 0 ]; then
+        v PASS "desktop/icons-rendered" "the desktop page renders $_d_ren icons"
+    else
+        v FAIL "desktop/icons-rendered" "the desktop page renders 0 icons (rendered=${_d_ren:-?} layout=${_d_foc:-?})"
+    fi
+
+    _d_drop=$(grep -a 'DESKTOPFILTER' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*dropped=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    _d_keep=$(grep -a 'DESKTOPFILTER' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*kept=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    case "$_d_drop" in ''|*[!0-9]*) _d_drop=-1 ;; esac
+    case "$_d_keep" in ''|*[!0-9]*) _d_keep=-1 ;; esac
+    if [ "$_d_drop" -lt 0 ]; then
+        v SKIP "desktop/filter-dropped" "no DESKTOPFILTER line in hilog"
+    elif [ "$_d_drop" -eq 0 ]; then
+        v PASS "desktop/filter-dropped" "kept=$_d_keep dropped=0"
+    else
+        v FAIL "desktop/filter-dropped" "kept=$_d_keep dropped=$_d_drop (items out of the grid or with a bad area)"
+    fi
+
+    # areaFixed 来自桌面页的周期性日志（开机的一次性日志会被 hilog 环形缓冲冲掉）
+    _d_area=$(grep -a 'DESKTOPICONS' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*areaFixed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+    case "$_d_area" in ''|*[!0-9]*) _d_area=-1 ;; esac
+    if [ "$_d_area" -lt 0 ]; then
+        _d_area=$(grep -a 'normalizeDesktopItemArea' "$W/A_desktop.txt" 2>/dev/null | sed -n 's/.*fixed=\([0-9][0-9]*\).*/\1/p' | tail -1)
+        case "$_d_area" in ''|*[!0-9]*) _d_area=-1 ;; esac
+    fi
+    if [ "$_d_area" -lt 0 ]; then
+        v SKIP "desktop/area-normalize" "no areaFixed/normalizeDesktopItemArea line in hilog (old SceneBoard HAP?)"
+    elif [ "$_d_area" -eq 0 ]; then
+        v PASS "desktop/area-normalize" "no item needed an area fix"
+    else
+        v PASS "desktop/area-normalize" "$_d_area items had an invalid area (NULL width/height) and were repaired"
+    fi
+
+    # ---- fix_desktop2: 桌面项的 page_index 不能是 NULL（桌面空白的真正原因）----
+    _d_pnull=$(_rdbcount gridlayout_info_desktop_null_page)
+    _d_pcnullp=$(_rdbcount pc_mode_gridlayout_info_desktop_null_page)
+    _d_dnull=$(_rdbcount gridlayout_info_desktop_null_area)
+    _d_pcdnull=$(_rdbcount pc_mode_gridlayout_info_desktop_null_area)
+    _d_pg=1
+    [ "$_d_pnull" -eq 0 ] || _d_pg=0
+    if [ "$_d_pcnullp" -gt 0 ] && [ "$_d_pnull" -eq 0 ]; then _d_pg=0; fi
+    if [ "$_d_pg" -eq 1 ]; then
+        v PASS "desktop/db-page" "all desktop rows have a page_index (grid:$_d_pnull null, pc_mode:$_d_pcnullp null) and a valid area (grid:$_d_dnull null, pc_mode:$_d_pcdnull null)"
+    elif [ "$_d_dnull" -gt 0 ]; then
+        v FAIL "desktop/db-page" "$_d_dnull desktop rows have NULL width/height and $_d_pnull have NULL page_index -> they belong to no page and are never rendered"
+    else
+        v FAIL "desktop/db-page" "$_d_pnull desktop rows have a NULL page_index (grid) / $_d_pcnullp (pc_mode) -> integrateSwiper() drops them -> the desktop shows no icons"
+    fi
+
+    # ---- fix_desktop2: SceneBoard 自己报的 integrateSwiper 错误（page 丢失的现场证据）----
+    _d_isw=$(grep -ac 'integrateSwiper page:' "$W/A_desktop.txt" 2>/dev/null)
+    case "$_d_isw" in ''|*[!0-9]*) _d_isw=0 ;; esac
+    if [ "$_d_isw" -eq 0 ]; then
+        v PASS "desktop/integrate-swiper" "no integrateSwiper error (every desktop item landed on a page)"
+    else
+        v FAIL "desktop/integrate-swiper" "$_d_isw 'integrateSwiper page:' errors -> items without a page are dropped"
+    fi
+
+    # ---- fix_desktop2: RS 节点树里的桌面图标节点（最硬的判据）----
+    _d_rs=$(sed -n 's/^rs_desktop_icon_nodes=\([0-9][0-9]*\).*/\1/p' "$W/A_desktop.txt" 2>/dev/null | tail -1)
+    case "$_d_rs" in ''|*[!0-9]*) _d_rs=-1 ;; esac
+    if [ "$_d_rs" -lt 0 ]; then
+        v SKIP "desktop/rs-icon-nodes" "the RS tree could not be dumped (no DUMP permission?)"
+    elif [ "$_d_rs" -gt 0 ]; then
+        v PASS "desktop/rs-icon-nodes" "$_d_rs desktop icon nodes in the RS tree (SwiperPage_AppItem_*)"
+    else
+        v FAIL "desktop/rs-icon-nodes" "no SwiperPage_AppItem_* node in the RS tree -> the desktop has no icons on screen"
+    fi
+
+    # ---- fix_hidumper: hidumper 是否可用（我们要用它看 RS 节点树）----
+    if grep -aq 'request error' "$W/A_hidumper_rs.txt" 2>/dev/null; then
+        v FAIL "hidumper/dump-permission" "hidumper returns 'request error' (no DUMP permission)"
+    elif [ -s "$W/A_hidumper_rs.txt" ] 2>/dev/null; then
+        v PASS "hidumper/dump-permission" "hidumper -s RenderService -a screen works"
+    else
+        v SKIP "hidumper/dump-permission" "no hidumper output"
+    fi
+
+    _d_tp=$(sed -n "/^--- count: 'taskpool::Task is pending' ---/{n;p;q;}" "$W/A_desktop.txt" 2>/dev/null | cut -c1-16)
+    case "$_d_tp" in
+        ''|*[!0-9]*) v SKIP "desktop/taskpool-stuck" "the taskpool counter is not in the log" ;;
+        0)           v PASS "desktop/taskpool-stuck" "0 pending taskpool tasks" ;;
+        *)           v FAIL "desktop/taskpool-stuck" "$_d_tp pending taskpool tasks (the desktop is stuck)" ;;
+    esac
+
+    if ls /data/log/faultlog/faultlogger/*/com.ohos.sceneboard* >/dev/null 2>&1; then
+        v FAIL "desktop/sceneboard-crash" "there are SceneBoard faultlog files"
+    else
+        v PASS "desktop/sceneboard-crash" "no SceneBoard faultlog"
+    fi
+
+    if grep -qa 'layoutInfo.json not found' "$W/A_desktop.txt" 2>/dev/null; then
+        v FAIL "desktop/layoutinfo-rawfile" "layoutInfo.json was not found in the HAP"
+    elif grep -qa 'layoutInfo' "$W/A_desktop.txt" 2>/dev/null; then
+        v PASS "desktop/layoutinfo-rawfile" "layoutInfo.json is present"
+    else
+        v SKIP "desktop/layoutinfo-rawfile" "no layoutInfo info in the log"
+    fi
+}
+
+# =============================================================================
+# B. 蓝牙 / Bluetooth
+# =============================================================================
+sec_bluetooth() {
+    banner B/bluetooth
+    hdr B_bluetooth.txt "B. BLUETOOTH"
+
+    # ---------------------------------------------------------------------
+    # 2026-10-22: the real machine never reached the HDI because nobody
+    # ever asked the framework to turn Bluetooth on.  bt_diag.sh triggers
+    # the enable through the very same framework entry point as the ArkTS
+    # API and dumps a hilog window of exactly that attempt, so the chain
+    # can be judged link by link.
+    # ---------------------------------------------------------------------
+    {
+        echo
+        echo "--- bt_diag.sh: the Bluetooth chain trigger + analysis ---"
+        if [ -x /system/bin/bt_diag.sh ]; then
+            timeout_cmd 120 /system/bin/bt_diag.sh 8 2>&1
+        else
+            echo "(/system/bin/bt_diag.sh is not installed - inject.sh did not run)"
+        fi
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    {
+        echo
+        echo "--- the Bluetooth log collectors (they survive the ring buffer) ---"
+        for f in /sys_prod/zz_bt_trigger.log /sys_prod/zz_bt_trigger_pre.log \
+                 /sys_prod/zz_bt_hilog.log /sys_prod/zz_bt_all.log; do
+            if [ -f "$f" ]; then
+                echo "$f: $(wc -l < "$f") lines, $(wc -c < "$f") bytes"
+            else
+                echo "$f: (absent)"
+            fi
+        done
+        echo
+        echo "--- zz_bt_all.log: every Bluetooth related line, any domain ---"
+        if [ -f /sys_prod/zz_bt_all.log ]; then
+            tail -400 /sys_prod/zz_bt_all.log
+        else
+            echo "(absent - the content collector is not running)"
+        fi
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    {
+        echo "--- PCI / USB enumeration ---"
+        lspci 2>/dev/null | grep -i blue
+        lsusb 2>/dev/null | grep -i blue
+        echo "--- dmesg: bt ---"
+        runsh /dev/null "$T_CMD" 'dmesg 2>/dev/null | grep -iE "bluetooth|btintel|hci|BTUSB|ibt" | tail -200'
+        dmesg 2>/dev/null | grep -iaE 'bluetooth|btintel|hci|ibt-' | tail -200
+        echo
+        echo "--- /sys/class/bluetooth ---"
+        ls -la /sys/class/bluetooth 2>/dev/null || echo "(absent)"
+        for d in /sys/class/bluetooth/hci*; do
+            [ -e "$d" ] || continue
+            echo "== $d =="
+            ls "$d" 2>/dev/null
+            cat "$d/device/uevent" 2>/dev/null
+        done
+        echo
+        echo "--- hci devices ---"
+        ls -la /dev/hci* /sys/class/net/*/device 2>/dev/null | head -40
+        echo
+        echo "--- bt vendor log ---"
+        found=0
+        for f in /sys_prod/bt_vendor.log /mnt/od/bt_vendor.log \
+                 /data/local/tmp/bt_vendor.log \
+                 /proc/1/root/data/local/tmp/bt_vendor.log; do
+            if [ -f "$f" ]; then
+                echo "=== $f  size=$(wc -c < "$f") ==="
+                tail -n 400 "$f"
+                found=1
+            else
+                echo "(absent) $f"
+            fi
+        done
+        [ "$found" = 1 ] || echo "(NO bt_vendor.log anywhere -- vendor HAL never dlopen()ed)"
+        echo
+        echo "--- libbt_vendor in the image ---"
+        ls -l /vendor/lib64/libbt_vendor.z.so /proc/1/root/vendor/lib64/libbt_vendor.z.so 2>&1
+        echo "--- hdf nodes for bluetooth ---"
+        ls -l /proc/1/root/dev/ 2>/dev/null | grep -aiE 'bt|blue|hci' | head
+        echo "--- blue_host process / maps ---"
+        for p in $(pidof blue_host 2>/dev/null); do
+            echo "pid $p: $(strings /proc/$p/cmdline 2>/dev/null | oneline)"
+            grep -a 'libbt_vendor' /proc/$p/maps 2>/dev/null | head -2
+        done
+        echo "--- bluetooth_service stdout (dmesg/kmsg) ---"
+        dmesg 2>/dev/null | grep -aiE 'bluetooth_service|blue_host|VendorInterface|libbt_vendor' | tail -40
+        echo
+        echo "--- hciconfig / btmgmt / bt stack tools ---"
+        for t in hciconfig btmgmt btmon bluetoothctl hcitool sdptool; do
+            command -v "$t" >/dev/null 2>&1 && echo "have $t" || echo "no $t"
+        done
+        have hciconfig && timeout_cmd 5 hciconfig -a
+        have btmgmt && timeout_cmd 5 btmgmt info
+        echo
+        echo "--- BT processes ---"
+        ps -A 2>/dev/null | grep -aiE 'bluetooth|bt_' || echo "(none)"
+        echo "--- BT host HDF service ---"
+        runsh "$W/B_hidumper.txt" "$T_CMD" 'ls -la /dev/hdf 2>&1 | head -5; echo ---; hidumper -ls 2>&1 | grep -i blue; echo ---; hidumper -s Bluetooth 2>&1 | head -200'
+        cat "$W/B_hidumper.txt" 2>/dev/null
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    {
+        echo
+        echo "--- hilog: bluetooth (text grep over the whole ring buffer) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aiE 'bluetooth|BluetoothService|bt_stack|bt_hdi|BluetoothHDI|btservice|BT_SERVICE' \
+            | tail -400
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    # ---------------------------------------------------------------------
+    # 2026-10-21: the real machine produced *zero* bluetooth log lines even
+    # though bluetooth_service was running.  Three possible reasons, all of
+    # them are checked here:
+    #   (a) the messages were pushed out of the 5000 line ring buffer
+    #   (b) the stack logs at DEBUG level and the global level is INFO
+    #   (c) the BT domains were never registered / the libs were not dlopen()ed
+    # The hilog *domain* filter is the reliable way to see the stack's own
+    # output.  Domain map (grepped out of the source tree):
+    #   0xD000100  bluetooth (misc)
+    #   0xD000101  bluetooth frameworks, inner (client side)
+    #   0xD000102  bluetooth_service  (the stack itself, tag "Bluetooth")
+    #   0xD000105  bluetooth HDI host service + A2DP audio HAL
+    # ---------------------------------------------------------------------
+    {
+        echo
+        echo "--- hilog: bluetooth DOMAIN 0xD000100,0xD000101,0xD000102,0xD000105 ---"
+        timeout_cmd "$T_HILOG" hilog -x -D 0xD000100,0xD000101,0xD000102,0xD000105 2>&1 | tail -600
+        echo
+        echo "--- hilog: bluetooth domain, DEBUG level, no tag filter ---"
+        timeout_cmd "$T_HILOG" hilog -x -D 0xD000102 2>&1 | tail -400
+        echo
+        echo "--- hilog: the BT *services* subsystem (SA list) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -aiE 'bluetooth.*(publish|register|onstart|SA )|SA1130|samgr.*1130' | tail -60
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    # --- the BT stack's own log directory (created by bluetooth_service.cfg) --
+    {
+        echo
+        echo "--- /data/bluetooth/log (created by the bluetooth_service init job) ---"
+        ls -la /data/bluetooth/log 2>&1 | head -40
+        find /data/bluetooth -type f 2>/dev/null | head -40
+        echo
+        echo "--- all bluetooth-ish files under /data/log ---"
+        find /data/log -iname '*blue*' -o -iname '*bt_*' -o -iname '*hci*' 2>/dev/null | head -40
+        echo
+        echo "--- hilog persistence tasks (written by zz_hilog_persist) ---"
+        timeout_cmd 10 hilog -w query 2>&1 | head -40
+        echo
+        echo "--- /data/log/hilog ---"
+        ls -la /data/log/hilog 2>&1 | head -30
+        mkdir -p "$W/B_hilog_persist" 2>/dev/null
+        for _f in /data/log/hilog/bt_stack* /data/log/hilog/btstack* \
+                  /data/log/hilog/audio* /data/log/hilog/wifi* /data/log/hilog/kmsg*; do
+            [ -f "$_f" ] || continue
+            _b=$(basename "$_f")
+            _sz=$(wc -c < "$_f" 2>/dev/null)
+            case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+            echo "=== $_f ($_sz B)"
+            if [ "$_sz" -gt 0 ]; then
+                head -c 400000 "$_f" > "$W/B_hilog_persist/$_b" 2>/dev/null
+                head -c 20000 "$_f" 2>/dev/null
+                echo
+            fi
+        done
+        echo
+        echo "--- the streaming collectors of zz_hilog_persist (survive a power off) ---"
+        for _f in /sys_prod/zz_bt_hilog.log /sys_prod/zz_kmsg_hilog.log \
+                  /data/local/tmp/zz_hilog_persist.txt; do
+            if [ -f "$_f" ]; then
+                echo "=== $_f ($(wc -c < "$_f") B) ==="
+                head -c 200000 "$_f"
+                echo
+            else
+                echo "(absent) $_f"
+            fi
+        done
+    } >> "$W/B_bluetooth.txt" 2>&1
+    # copy the streaming collectors into the bundle as well
+    mkdir -p "$W/B_hilog_stream" 2>/dev/null
+    for _f in /sys_prod/zz_bt_hilog.log /sys_prod/zz_kmsg_hilog.log; do
+        [ -f "$_f" ] || continue
+        head -c 400000 "$_f" > "$W/B_hilog_stream/$(basename "$_f")" 2>/dev/null
+    done
+
+    # --- were the BT libraries actually mapped into the process? --------------
+    {
+        echo
+        echo "--- bluetooth_service process + mapped libraries ---"
+        _bpid=$(pidof bluetooth_service 2>/dev/null | cut -d' ' -f1)
+        if [ -z "$_bpid" ]; then
+            _bpid=$(ps -A 2>/dev/null | grep -a 'bluetooth_service' | head -1 | sed -e 's/^ *//' -e 's/ .*//')
+        fi
+        echo "bluetooth_service pid = ${_bpid:-NONE}"
+        if [ -n "$_bpid" ] && [ -d "/proc/$_bpid" ]; then
+            echo "--- /proc/$_bpid/maps (bt related) ---"
+            grep -aE 'libbtstack|libbt_vendor|libbluetooth|hci|hdf' "/proc/$_bpid/maps" 2>/dev/null | head -40
+            echo "--- /proc/$_bpid/maps: NOT FOUND markers ---"
+            grep -acE 'libbtstack' "/proc/$_bpid/maps" 2>/dev/null | sed 's/^/libbtstack mappings: /'
+            grep -acE 'libbt_vendor' "/proc/$_bpid/maps" 2>/dev/null | sed 's/^/libbt_vendor mappings: /'
+            grep -acE 'libbluetooth_hdi_adapter' "/proc/$_bpid/maps" 2>/dev/null | sed 's/^/libbluetooth_hdi_adapter mappings: /'
+            echo "--- /proc/$_bpid/maps: full (head) ---"
+            head -40 "/proc/$_bpid/maps" 2>/dev/null
+        fi
+        echo
+        echo "--- blue_host (HDF host) process + maps ---"
+        for p in $(pidof blue_host 2>/dev/null); do
+            echo "pid $p"
+            grep -aE 'libbt_vendor|libchip|bluetooth' "/proc/$p/maps" 2>/dev/null | head -20
+        done
+        echo
+        echo "--- the BT libraries that exist in the image ---"
+        for l in /system/lib64/libbtstack.z.so /system/lib64/libbluetooth_hdi_adapter.z.so \
+                 /system/lib64/libbluetooth_server.z.so /vendor/lib64/libbt_vendor.z.so \
+                 /vendor/lib64/libbluetooth_hci_hdi_driver.z.so; do
+            if [ -e "$l" ]; then echo "OK      $l ($(wc -c < "$l") B)"; else echo "MISSING $l"; fi
+        done
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    # --- hidumper of the bluetooth SA (the id is 1130, not "Bluetooth") ------
+    {
+        echo
+        echo "--- hidumper -s 1130 (bluetooth system ability) ---"
+        timeout_cmd 20 hidumper -s 1130 2>&1 | head -300
+        echo
+        echo "--- hidumper -s 1130 -a '-a' options ---"
+        timeout_cmd 20 hidumper -s 1130 -a '-h' 2>&1 | head -60
+        echo
+        echo "--- hidumper -ls | bluetooth ---"
+        timeout_cmd 20 hidumper -ls 2>&1 | grep -aiE 'blue|1130' | head -20
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    # --- the boot dmesg: was the BT controller even found? --------------------
+    {
+        echo
+        echo "--- EARLY boot dmesg: bluetooth / hci / btintel ---"
+        for _bf in /sys_prod/dmesg_boot_t0.log /data/dmesg_boot_t0.log \
+                    /ohoslog/ptl-log/dmesg.boot.log; do
+            [ -f "$_bf" ] || continue
+            echo "=== $_bf"
+            grep -aiE 'bluetooth|btintel|btusb|hci|ibt-' "$_bf" 2>/dev/null | head -120
+            break
+        done
+    } >> "$W/B_bluetooth.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    _bmp=/sys_prod/dmesg_boot_t0.log
+    [ -f "$_bmp" ] || _bmp=/data/dmesg_boot_t0.log
+    if [ -f "$_bmp" ]; then
+        vgrep PASS "bt/boot-dmesg-has-bt-probe" "$_bmp" 'bluetooth|btintel|hci'
+    else
+        v SKIP "bt/boot-dmesg-has-bt-probe" "no early dmesg file"
+    fi
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+        v PASS "bt/hci-device-present" "hci0 ($(ls /sys/class/bluetooth 2>/dev/null | oneline))"
+    elif [ -d /sys/class/bluetooth ]; then
+        v FAIL "bt/hci-device-present" "/sys/class/bluetooth exists but there is no hci0"
+    else
+        v FAIL "bt/hci-device-present" "/sys/class/bluetooth does not exist"
+    fi
+    # 2026-10-22: the vendor HAL writes into files that the loading process
+    # (blue_host, uid "blue_host") cannot create, so the *file* is missing
+    # even when the HAL ran fine.  The real evidence is the hilog trace of
+    # the tag "bt_vendor" (domain 0xD000105) in the trigger window.
+    _trig0=/sys_prod/zz_bt_trigger.log
+    if [ -s "$_trig0" ] && grep -aq 'bt_vendor' "$_trig0" 2>/dev/null; then
+        v PASS "bt/vendor-hal-log" "the vendor HAL logged (hilog tag bt_vendor)"
+    elif [ -f /data/local/tmp/bt_vendor.log ]; then
+        v PASS "bt/vendor-hal-log" "bt_vendor.log exists"
+    elif [ -f /sys_prod/bt_vendor.log ]; then
+        v PASS "bt/vendor-hal-log" "bt_vendor.log exists on /sys_prod"
+    else
+        v FAIL "bt/vendor-hal-log" "no vendor HAL trace (the file sink is not writable from blue_host - look for the hilog tag bt_vendor)"
+    fi
+    vfile PASS "bt/vendor-hal-log-sysprod" /sys_prod/bt_vendor.log 1
+    _bpid=$(pidof bluetooth_service 2>/dev/null | cut -d' ' -f1)
+    if [ -n "$_bpid" ]; then
+        v PASS "bt/bluetooth_service-running" "pid $_bpid"
+    else
+        v FAIL "bt/bluetooth_service-running" "no bluetooth_service pid"
+    fi
+    if [ -n "$_bpid" ] && [ -r "/proc/$_bpid/maps" ]; then
+        vgrep PASS "bt/libbtstack-mapped" "/proc/$_bpid/maps" 'libbtstack'
+    else
+        v SKIP "bt/libbtstack-mapped" "bluetooth_service is not running"
+    fi
+    # the vendor HAL is dlopen()ed by the HDF *host* service (blue_host),
+    # not by bluetooth_service - looking into the wrong process always
+    # reported "not loaded" (2026-10-22).
+    _bhost=$(pidof blue_host 2>/dev/null | cut -d' ' -f1)
+    if [ -z "$_bhost" ]; then
+        _bhost=$(ps -A 2>/dev/null | grep -a 'blue_host' | head -1 | sed -e 's/^ *//' -e 's/ .*//')
+    fi
+    if [ -n "$_bhost" ] && [ -r "/proc/$_bhost/maps" ]; then
+        vgrep PASS "bt/libbt-vendor-mapped" "/proc/$_bhost/maps" 'libbt_vendor'
+    else
+        v SKIP "bt/libbt-vendor-mapped" "blue_host is not running"
+    fi
+    _btdom="$W/.bt_dom"
+    timeout_cmd "$T_HILOG" hilog -x -D 0xD000100,0xD000101,0xD000102,0xD000105 > "$_btdom" 2>/dev/null
+    _btlines=$(wc -l < "$_btdom" 2>/dev/null)
+    case "$_btlines" in ''|*[!0-9]*) _btlines=0 ;; esac
+    # 2026-10-22: the ring buffer is NOT the only place where the BT log
+    # lives, and on a busy machine the BT lines are long gone from it (the
+    # ring buffer holds a few thousand lines).  The streaming collectors on
+    # /sys_prod keep the whole session, so they are the primary source.
+    _btstream=0
+    for _f in /sys_prod/zz_bt_hilog.log /sys_prod/zz_bt_all.log /sys_prod/zz_bt_trigger.log; do
+        [ -f "$_f" ] || continue
+        _n=$(wc -l < "$_f" 2>/dev/null)
+        case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+        _btstream=$((_btstream + _n))
+    done
+    if [ "$_btstream" -gt 0 ]; then
+        v PASS "bt/hilog-domain-has-lines" "$_btstream lines in the BT collectors (streamed), $_btlines in the ring buffer"
+    elif [ "$_btlines" -gt 0 ]; then
+        v PASS "bt/hilog-domain-has-lines" "$_btlines lines in the BT domains"
+    else
+        v FAIL "bt/hilog-domain-has-lines" "the BT hilog domains are EMPTY (see zz_hilog_persist)"
+    fi
+    rm -f "$_btdom" 2>/dev/null
+
+    # --- the chain, link by link (from the bt_diag.sh trigger window) ------
+    _trig=/sys_prod/zz_bt_trigger.log
+    if [ -x /system/bin/bt_enable ]; then
+        v PASS "bt/bt-enable-tool" "/system/bin/bt_enable is installed"
+    else
+        v FAIL "bt/bt-enable-tool" "/system/bin/bt_enable is missing"
+    fi
+    if [ -s "$_trig" ]; then
+        _c0=$(grep -acE 'EnableBle|enableBluetooth|AdapterManager::Enable' "$_trig" 2>/dev/null)
+        _c1=$(grep -acE 'ClassicAdapter.*Enable|BleAdapter.*Enable|BTM_Enable' "$_trig" 2>/dev/null)
+        _c2=$(grep -acE 'HCI_Initialize|LoadHdiLib|libbluetooth_hdi_adapter' "$_trig" 2>/dev/null)
+        _c3=$(grep -acE 'HciInterfaceImpl|hdiInit' "$_trig" 2>/dev/null)
+        _c4=$(grep -acE 'VendorInterface dlopen' "$_trig" 2>/dev/null)
+        _c5=$(grep -ac 'bt_vendor' "$_trig" 2>/dev/null)
+        case "$_c0" in ''|*[!0-9]*) _c0=0 ;; esac
+        case "$_c1" in ''|*[!0-9]*) _c1=0 ;; esac
+        case "$_c2" in ''|*[!0-9]*) _c2=0 ;; esac
+        case "$_c3" in ''|*[!0-9]*) _c3=0 ;; esac
+        case "$_c4" in ''|*[!0-9]*) _c4=0 ;; esac
+        case "$_c5" in ''|*[!0-9]*) _c5=0 ;; esac
+        if [ "$_c0" -gt 0 ]; then
+            v PASS "bt/chain-enable-request" "the enable request reached the framework ($_c0)"
+        else
+            v FAIL "bt/chain-enable-request" "the enable request never reached the framework"
+        fi
+        if [ "$_c1" -gt 0 ]; then
+            v PASS "bt/chain-adapter-enabled" "the service enabled the adapter ($_c1)"
+        else
+            v FAIL "bt/chain-adapter-enabled" "the service never enabled the adapter (BTM_Enable)"
+        fi
+        if [ "$_c2" -gt 0 ]; then
+            v PASS "bt/chain-hci-init" "the stack entered HCI_Initialize ($_c2)"
+        else
+            v FAIL "bt/chain-hci-init" "HCI_Initialize was never reached"
+        fi
+        if [ "$_c3" -gt 0 ]; then
+            v PASS "bt/chain-hdi-init" "the HDF proxy was initialised ($_c3)"
+        else
+            v FAIL "bt/chain-hdi-init" "the HDF proxy was never initialised"
+        fi
+        if [ "$_c4" -gt 0 ]; then
+            v PASS "bt/chain-vendor-hal-dlopen" "blue_host dlopen()ed the vendor HAL ($_c4)"
+        else
+            v FAIL "bt/chain-vendor-hal-dlopen" "the vendor HAL was never dlopen()ed"
+        fi
+        if [ "$_c5" -gt 0 ]; then
+            v PASS "bt/chain-vendor-hal-alive" "the vendor HAL logged ($_c5 lines)"
+        else
+            v FAIL "bt/chain-vendor-hal-alive" "the vendor HAL produced no log"
+        fi
+    else
+        for _k in bt/chain-enable-request bt/chain-adapter-enabled bt/chain-hci-init \
+                  bt/chain-hdi-init bt/chain-vendor-hal-dlopen bt/chain-vendor-hal-alive; do
+            v SKIP "$_k" "no trigger window (/sys_prod/zz_bt_trigger.log)"
+        done
+    fi
+}
+
+# =============================================================================
+# C. 音频 / Audio
+# =============================================================================
+sec_audio() {
+    banner C/audio
+    hdr C_audio.txt "C. AUDIO"
+
+    {
+        echo "--- /proc/asound/cards ---"
+        cat /proc/asound/cards 2>/dev/null || echo "(absent)"
+        echo
+        echo "--- /proc/asound/pcm ---"
+        cat /proc/asound/pcm 2>/dev/null
+        echo
+        echo "--- /proc/asound/devices ---"
+        cat /proc/asound/devices 2>/dev/null | head -120
+        echo
+        echo "--- aplay -l ---"
+        have aplay && runsh "$W/C_aplay.txt" "$T_CMD" 'aplay -l 2>&1; echo ---; aplay -L 2>&1 | head -80; echo ---; arecord -l 2>&1'
+        cat "$W/C_aplay.txt" 2>/dev/null
+        echo
+        echo "--- amixer ---"
+        have amixer && runsh "$W/C_amixer.txt" "$T_CMD" \
+            'amixer -c 0 cget 2>&1 | head -200; echo ---; amixer -c 0 scontrols 2>&1 | head -120; echo ---; for c in Master PCM Headphone "Headphone Volume" Playback "Playback Volume" Speaker; do amixer -c 0 get $c 2>&1; done'
+        cat "$W/C_amixer.txt" 2>/dev/null
+        echo
+        echo "--- dmesg: sof / snd / audio ---"
+        dmesg 2>/dev/null | grep -iaE 'sof|snd|asoc|hda|audio' | tail -200
+        echo
+        echo "--- audio processes ---"
+        ps -A 2>/dev/null | grep -aiE 'audio' || echo "(none)"
+        echo "--- libasound + alsa conf (this round fixed aplay/amixer) ---"
+        for f in /system/lib64/libasound.so /vendor/lib64/libasound.so \
+                 /lib64/libasound.so; do
+            if [ -e "$f" ]; then echo "OK      $f ($(wc -c < "$f") B)"; else echo "MISSING $f"; fi
+        done
+        echo "--- readelf-style NEEDED of aplay (which libasound it wants) ---"
+        ls -l /system/bin/aplay 2>&1
+        echo "--- alsa conf tree ---"
+        ls /system/etc/audio/alsa/share 2>&1
+        ls /system/etc/audio/alsa/share/cards 2>&1 | head -8
+        echo "--- aplay -L (first 20) ---"
+        aplay -L 2>&1 | head -20
+        echo "--- amixer -c0 cget name=Master Playback Volume (the HDI control) ---"
+        amixer -c 0 cget name='Master Playback Volume' 2>&1
+        echo "--- amixer -c0 ccontents (playback elements only) ---"
+        amixer -c 0 ccontents 2>&1 | grep -aE 'numid=|name=' | head -60
+        echo "--- zz_audiotest info (tail) ---"
+        /system/bin/zz_audiotest info 2>&1 | tail -40
+        echo "--- audio HIDL/HDI ---"
+        ls -la /dev/hdf 2>/dev/null | head -3
+        runsh "$W/C_hidumper.txt" "$T_CMD" 'hidumper -ls 2>&1 | grep -i audio; echo ---; hidumper -s AudioPolicyService 2>&1 | head -200'
+        cat "$W/C_hidumper.txt" 2>/dev/null
+    } >> "$W/C_audio.txt" 2>&1
+
+    {
+        echo
+        echo "--- hilog: audio ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aiE 'audio|AudioPolicy|AudioRenderer|AudioCapturer|HDIAdapter|audio_host|audio_server' \
+            | tail -400
+    } >> "$W/C_audio.txt" 2>&1
+
+    # ---------------------------------------------------------------------
+    # 2026-10-21: the audio problem is a *probe* problem.  The SOF PCI driver
+    # is built in and probes during the initcall phase, long before /system
+    # is mounted; if it fails hard (-ENODEV) the kernel never retries it.
+    # The evidence of that first probe is only in the early ring buffer, so we
+    # pull it from the zz_dmesg_boot capture as well.
+    # ---------------------------------------------------------------------
+    {
+        echo
+        echo "--- EARLY boot dmesg: SOF / HDA / ALSA ---"
+        for _af in /sys_prod/dmesg_boot_t0.log /data/dmesg_boot_t0.log \
+                    /ohoslog/ptl-log/dmesg.boot.log; do
+            [ -f "$_af" ] || continue
+            echo "=== $_af"
+            grep -aiE 'sof|hda|alc269|ehdaudio|snd|sound card|machine driver|deferred probe' "$_af" 2>/dev/null | head -200
+            break
+        done
+        echo
+        echo "--- ZZSOF: (the zz_sof_reprobe service log) ---"
+        dmesg 2>/dev/null | grep -a 'ZZSOF:' | tail -120
+        for _pf in /sys/fs/pstore/*; do
+            [ -f "$_pf" ] || continue
+            grep -a 'ZZSOF:' "$_pf" 2>/dev/null | tail -60
+        done
+        echo
+        echo "--- zz_sof_reprobe result file ---"
+        for _rf in /data/local/tmp/zz_sof_reprobe.txt /sys_prod/zz_sof_reprobe.txt \
+                    /data/zz_sof_reprobe.txt; do
+            [ -f "$_rf" ] && { echo "=== $_rf"; cat "$_rf"; }
+        done
+        echo
+        echo "--- the SOF DSP PCI device (is it bound to a driver?) ---"
+        for _d in /sys/bus/pci/devices/*/; do
+            [ -r "$_d/uevent" ] || continue
+            grep -q '^PCI_ID=8086:E428$' "$_d/uevent" 2>/dev/null || continue
+            echo "  DSP at ${_d%/}"
+            echo "    uevent: $(cat "$_d/uevent" 2>/dev/null | oneline)"
+            echo "    driver: $(readlink -f "$_d/driver" 2>/dev/null)"
+            echo "    modalias: $(cat "$_d/modalias" 2>/dev/null)"
+        done
+        echo
+        echo "--- SOF firmware present? ---"
+        ls -la /system/lib/firmware/intel/sof-ipc4/ptl/ 2>&1 | head -20
+        echo "--- the AudioDSP IRQ (registered => the probe got that far) ---"
+        grep -a 'AudioDSP' /proc/interrupts 2>/dev/null | head -5 || echo "(no AudioDSP IRQ)"
+        echo
+        echo "--- audio_policy / audio server processes + their libs ---"
+        for p in $(pidof audio_server 2>/dev/null) $(pidof audio_policy_service 2>/dev/null) \
+                 $(pidof audio_host 2>/dev/null); do
+            echo "pid $p: $(strings /proc/$p/cmdline 2>/dev/null | oneline)"
+            grep -aE 'libhdi_audio|libaudio|libtinyalsa' "/proc/$p/maps" 2>/dev/null | head -8
+        done
+        echo
+        echo "--- ALSA config / card definitions ---"
+        ls /system/etc/audio/alsa/share/cards 2>&1 | head -20
+        echo
+        echo "--- speaker-test (does the mixer actually produce samples?) ---"
+        timeout_cmd 10 speaker-test -D default -c 2 -t sine -l 1 2>&1 | head -20
+    } >> "$W/C_audio.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    _acard=/proc/asound/cards
+    if [ -r "$_acard" ] && grep -q 'sofhdadsp' "$_acard" 2>/dev/null; then
+        v PASS "audio/sofhdadsp-card-present" "$(grep -a sofhdadsp "$_acard" | head -1)"
+    else
+        v FAIL "audio/sofhdadsp-card-present" "no sofhdadsp in /proc/asound/cards"
+    fi
+    vfile PASS "audio/asound-cards" /proc/asound/cards 1
+    _apcm=/proc/asound/pcm
+    if [ -r "$_apcm" ]; then
+        v PASS "audio/pcm-devices" "$(grep -ac '' "$_apcm" 2>/dev/null) line(s) in /proc/asound/pcm"
+    else
+        v FAIL "audio/pcm-devices" "/proc/asound/pcm missing"
+    fi
+    _amix="$W/.amixer_cget"
+    timeout_cmd 15 amixer -c 0 cget name='Master Playback Volume' > "$_amix" 2>&1
+    if grep -aq 'Master Playback Volume' "$_amix" 2>/dev/null; then
+        v PASS "audio/master-playback-volume" "amixer control present"
+        # the value/mute state matters: a muted or zero "Master Playback
+        # Volume" is indistinguishable from "no sound" for the user.
+        _mv=$(sed -n 's/.*: values=\([0-9][0-9]*\).*/\1/p' "$_amix" 2>/dev/null | head -1)
+        _mm=$(sed -n 's/.*mute=\([0-9]\).*/\1/p' "$_amix" 2>/dev/null | head -1)
+        if [ "${_mm:-1}" = "0" ] && [ "${_mv:-0}" -gt 0 ] 2>/dev/null; then
+            v PASS "audio/master-ctrl-unmuted" "Master Playback Volume=$_mv mute=0"
+        else
+            v FAIL "audio/master-ctrl-unmuted" "Master Playback Volume=${_mv:-?} mute=${_mm:-?}"
+        fi
+    else
+        v FAIL "audio/master-playback-volume" "amixer -c0 cget name='Master Playback Volume' failed"
+        v FAIL "audio/master-ctrl-unmuted" "control not present"
+    fi
+    rm -f "$_amix" 2>/dev/null
+    # The playback PCM that carries the speaker.  There is NO PCM literally
+    # named "Speaker" on a SOF card: the DAI is called "HDA Analog" (PCM 0 of
+    # card 0) and "Speaker"/"Headphone" are *mixer controls* of the analog
+    # codec.  So the check is: the playback PCM exists AND the codec's
+    # speaker control exists.
+    _aspk_pcm=""
+    if [ -r "$_apcm" ]; then
+        _aspk_pcm=$(grep -aE '^0[0-9]-0[0-9]+:.*playback' "$_apcm" 2>/dev/null | head -1 | oneline)
+    fi
+    if [ -n "$_aspk_pcm" ]; then
+        v PASS "audio/speaker-output-pcm-present" "playback PCM: $(printf '%s' "$_aspk_pcm" | oneline)"
+    else
+        v FAIL "audio/speaker-output-pcm-present" "no playback PCM in /proc/asound/pcm"
+    fi
+    # --- playback checks ------------------------------------------------------
+    # NOTE: on a real device the ALSA device is opened EXCLUSIVELY by
+    # audio_host (the OHOS audio server), therefore "aplay -D default" fails
+    # with "audio open error: Resource busy" -- that is NOT a fault.
+    #   1) "null"  -> proves alsa-lib + the PCM path work
+    #   2) "default" -> tells us who owns the device (exclusive owner = audio_host)
+    _aplnull="$W/.aplay_null"
+    timeout_cmd 20 aplay -D null -t raw -f S16_LE -r 8000 -c 1 /dev/zero > "$_aplnull" 2>&1
+    if grep -aqE 'Playing WAVE|playing' "$_aplnull" 2>/dev/null; then
+        v PASS "audio/aplay-null-playback" "aplay -D null works (alsa + PCM path OK)"
+    else
+        v FAIL "audio/aplay-null-playback" "aplay -D null failed: $(head -2 "$_aplnull" 2>/dev/null | oneline)"
+    fi
+    rm -f "$_aplnull" 2>/dev/null
+    _ahost=$(pidof audio_host 2>/dev/null)
+    _apl="$W/.aplay_test"
+    timeout_cmd 20 aplay -D default -t raw -f S16_LE -r 8000 -c 1 /dev/zero > "$_apl" 2>&1
+    if grep -aqE 'Playing WAVE|playing' "$_apl" 2>/dev/null; then
+        v PASS "audio/aplay-default-playback" "aplay -D default works"
+    elif grep -aqi 'Resource busy' "$_apl" 2>/dev/null && [ -n "$_ahost" ]; then
+        v PASS "audio/aplay-default-playback" "device busy: held exclusively by audio_host (pid $_ahost), not a fault"
+    elif grep -aqi 'Resource busy' "$_apl" 2>/dev/null; then
+        v WARN "audio/aplay-default-playback" "device busy but audio_host is not running"
+    else
+        v FAIL "audio/aplay-default-playback" "aplay -D default failed: $(head -2 "$_apl" 2>/dev/null | oneline)"
+    fi
+    rm -f "$_apl" 2>/dev/null
+    if [ -n "$_ahost" ]; then
+        v PASS "audio/device-exclusive-owner" "audio_host running (pid $_ahost) -> ALSA device is used exclusively by the OHOS audio server"
+    else
+        v SKIP "audio/device-exclusive-owner" "audio_host not running"
+    fi
+    _admesg=/sys_prod/dmesg_boot_t0.log
+    [ -f "$_admesg" ] || _admesg=/data/dmesg_boot_t0.log
+    if [ -f "$_admesg" ]; then
+        vgrep PASS "audio/boot-dmesg-has-sof" "$_admesg" 'sof'
+    else
+        v SKIP "audio/boot-dmesg-has-sof" "no early dmesg file"
+    fi
+    # the marker can be rotated out of the live ring buffer, so the early
+    # boot dumps are searched as well
+    _zzsof=0
+    _zzsrc=""
+    for _zf in /sys_prod/dmesg_boot_t0.log /sys_prod/dmesg_boot_t15.log \
+               /sys_prod/dmesg_boot_subsystems.log /data/dmesg_boot_t0.log; do
+        [ -f "$_zf" ] || continue
+        _zn=$(grep -ac 'ZZSOF:' "$_zf" 2>/dev/null)
+        case "$_zn" in ''|*[!0-9]*) _zn=0 ;; esac
+        if [ "$_zn" -gt 0 ]; then
+            _zzsof=$(( _zzsof + _zn ))
+            _zzsrc="$_zzsrc $_zf($_zn)"
+        fi
+    done
+    _zn=$(dmesg 2>/dev/null | grep -ac 'ZZSOF:')
+    case "$_zn" in ''|*[!0-9]*) _zn=0 ;; esac
+    if [ "$_zn" -gt 0 ]; then
+        _zzsof=$(( _zzsof + _zn ))
+        _zzsrc="$_zzsrc dmesg($_zn)"
+    fi
+    if [ "$_zzsof" -gt 0 ]; then
+        v PASS "audio/zz-sof-reprobe-ran" "$_zzsof ZZSOF: lines from:$_zzsrc"
+    else
+        v FAIL "audio/zz-sof-reprobe-ran" "no ZZSOF: lines in dmesg or in the early boot dumps"
+    fi
+
+    # ---------------------------------------------------------------------
+    # fix_sof_topo: is the SOF topology the *right* one, and is the speaker
+    # path really open?  The topology name is NOT taken from ACPI and NOT
+    # from a match table: the kernel driver picks it
+    #   sound/soc/intel/common/soc-acpi-intel-hda-match.c:16  "sof-hda-generic"
+    #   sound/soc/sof/intel/hda.c:1556-1607                    + "-<dmic>ch" fixup
+    #   sound/soc/sof/intel/pci-ptl.c:48                        dir "intel/sof-ipc4-tplg"
+    # so the authoritative record is the boot dmesg "Topology file:" line.
+    # ---------------------------------------------------------------------
+    _atop=""
+    for _tf in /sys_prod/dmesg_boot_t0.log /data/dmesg_boot_t0.log \
+               /sys_prod/dmesg_boot_t15.log /sys_prod/dmesg_boot_subsystems.log; do
+        [ -f "$_tf" ] || continue
+        _atop=$(grep -ao 'Topology file:[^ ]*.*' "$_tf" 2>/dev/null | head -1)
+        [ -n "$_atop" ] && break
+    done
+    [ -n "$_atop" ] || _atop=$(dmesg 2>/dev/null | grep -ao 'Topology file:[^ ]*.*' | head -1)
+    if [ -n "$_atop" ]; then
+        v PASS "audio/sof-topology-in-dmesg" "$(printf '%s' "$_atop" | oneline)"
+        _atopf=$(printf '%s' "$_atop" | sed -n 's/.*Topology file:[[:space:]]*\([^ ]*\).*/\1/p')
+        if [ -n "$_atopf" ] && [ -f "/system/lib/firmware/$_atopf" ]; then
+            v PASS "audio/sof-topology-file-present" "/system/lib/firmware/$_atopf"
+        else
+            v FAIL "audio/sof-topology-file-present" "missing /system/lib/firmware/$_atopf"
+        fi
+    else
+        v FAIL "audio/sof-topology-in-dmesg" "no 'Topology file:' line in dmesg / boot logs"
+        v SKIP "audio/sof-topology-file-present" "topology name unknown"
+    fi
+    # The analog codec of this machine is on the HDA link (ALC256 at
+    # ehdaudio0D0), NOT a cSSP/SDW codec -> the HDA-generic topology is the
+    # correct one and no sof-ptl-*.tplg is required.
+    _acod=""
+    for _cf in /sys_prod/dmesg_boot_t0.log /data/dmesg_boot_t0.log \
+               /sys_prod/dmesg_boot_t15.log /sys_prod/dmesg_boot_subsystems.log; do
+        [ -f "$_cf" ] || continue
+        _acod=$(grep -ao 'autoconfig for ALC[0-9]*:[^ ]*' "$_cf" 2>/dev/null | head -1)
+        [ -n "$_acod" ] && break
+    done
+    [ -n "$_acod" ] || _acod=$(dmesg 2>/dev/null | grep -ao 'autoconfig for ALC[0-9]*:[^ ]*' | head -1)
+    if [ -n "$_acod" ]; then
+        _aspkline=$(grep -ao 'speaker_outs=[^ ]*\|line_outs=[^ ]*' "$_acod" 2>/dev/null | head -1)
+        if printf '%s' "$_acod" | grep -aq 'type:speaker'; then
+            v PASS "audio/speaker-on-hda-codec" "$(printf '%s' "$_acod" | oneline)"
+        else
+            v FAIL "audio/speaker-on-hda-codec" "$(printf '%s' "$_acod" | oneline) (no type:speaker)"
+        fi
+    else
+        v WARN "audio/speaker-on-hda-codec" "no 'autoconfig for ALCxxx' line in dmesg (codec not on HDA?)"
+    fi
+    # the codec's speaker control must exist and must not be muted
+    _aspk="$W/.spk"
+    amixer -c 0 cget name='Speaker Playback Volume' > "$_aspk" 2>&1
+    if grep -aq 'Speaker Playback Volume' "$_aspk" 2>/dev/null; then
+        _sv=$(sed -n 's/.*: values=\([0-9][0-9]*\).*/\1/p' "$_aspk" 2>/dev/null | head -1)
+        _sm=$(sed -n 's/.*mute=\([0-9]\).*/\1/p' "$_aspk" 2>/dev/null | head -1)
+        if [ "${_sm:-1}" = "0" ] && [ "${_sv:-0}" -gt 0 ] 2>/dev/null; then
+            v PASS "audio/speaker-ctrl-unmuted" "Speaker Playback Volume=$_sv mute=0"
+        else
+            v FAIL "audio/speaker-ctrl-unmuted" "Speaker Playback Volume=$_sv mute=${_sm:-?}"
+        fi
+    else
+        v FAIL "audio/speaker-ctrl-unmuted" "no 'Speaker Playback Volume' control on card 0"
+    fi
+    rm -f "$_aspk" 2>/dev/null
+    # the SOF DAI mixers of the "HDA Analog" path: 0 => digital silence even
+    # though the PCM is open and the codec is unmuted.
+    for _mix in "Pre Mixer Analog Playback Volume" "Post Mixer Analog Playback Volume" \
+                "Pre Mixer Deepbuffer HDA Analog Volume"; do
+        _amx="$W/.mix"
+        amixer -c 0 cget name="$_mix" > "$_amx" 2>&1
+        case "$_mix" in
+            "Pre Mixer Analog"*)  _mkey=audio/sof-pre-mixer-nonzero ;;
+            "Post Mixer Analog"*) _mkey=audio/sof-post-mixer-nonzero ;;
+            *)     _mkey=audio/sof-dai-mixer-nonzero ;;
+        esac
+        if grep -aq "$_mix" "$_amx" 2>/dev/null; then
+            _mv=$(sed -n 's/.*: values=\([0-9][0-9]*\).*/\1/p' "$_amx" 2>/dev/null | head -1)
+            _mmx=$(sed -n 's/.*max=\([0-9][0-9]*\).*/\1/p' "$_amx" 2>/dev/null | head -1)
+            if [ "${_mv:-0}" -gt 0 ] 2>/dev/null; then
+                v PASS "$_mkey" "$_mix=$_mv (max=${_mmx:-?})"
+            else
+                v FAIL "$_mkey" "$_mix=${_mv:-?} (0 = SOF DAI muted, max=${_mmx:-?})"
+            fi
+        else
+            v SKIP "$_mkey" "control '$_mix' not present"
+        fi
+        rm -f "$_amx" 2>/dev/null
+    done
+    # the playback PCM of card 0: state + owner (RUNNING == the stream is live)
+    _ast=""
+    for _sf in /proc/asound/card0/pcm0p/sub0/status /proc/asound/card0/pcm0p/status; do
+        [ -r "$_sf" ] || continue
+        _ast=$(cat "$_sf" 2>/dev/null | oneline)
+        break
+    done
+    if [ -n "$_ast" ]; then
+        v PASS "audio/pcm0p-state" "$_ast"
+    else
+        v WARN "audio/pcm0p-state" "no /proc/asound/card0/pcm0p/sub0/status"
+    fi
+    # ---------------------------------------------------------------------
+    # Does the framework actually FEED the PCM?  hw_ptr is the number of
+    # frames the hardware has consumed.  If it does not move while the PCM
+    # is RUNNING, the OHOS framework opened the device but never wrote a
+    # single sample -> the fault is in the framework (HPAE / hdiadapter),
+    # not in SOF/ALC256.
+    # NOTE: run this while something is playing, otherwise "not running" is
+    # the expected result.
+    # ---------------------------------------------------------------------
+    _sfile=""
+    for _sf in /proc/asound/card0/pcm0p/sub0/status /proc/asound/card0/pcm0p/status; do
+        [ -r "$_sf" ] || continue
+        _sfile="$_sf"
+        break
+    done
+    if [ -n "$_sfile" ]; then
+        _hp1=$(sed -n 's/^[[:space:]]*hw_ptr[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_sfile" 2>/dev/null | head -1)
+        _st1=$(sed -n 's/^state:[[:space:]]*//p' "$_sfile" 2>/dev/null | head -1)
+        sleep 2
+        _hp2=$(sed -n 's/^[[:space:]]*hw_ptr[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_sfile" 2>/dev/null | head -1)
+        _st2=$(sed -n 's/^state:[[:space:]]*//p' "$_sfile" 2>/dev/null | head -1)
+        case "$_hp1$_hp2" in
+            ''|*[!0-9]*) _hp1=0; _hp2=0 ;;
+        esac
+        _hpd=$(( _hp2 - _hp1 ))
+        if [ "$_hpd" -gt 0 ]; then
+            v PASS "audio/pcm-data-flowing" "hw_ptr advanced by $_hpd frames in 2 s (state=${_st2:-?})"
+        elif [ "${_st2:-}" = "RUNNING" ]; then
+            v FAIL "audio/pcm-data-flowing" "PCM is RUNNING but hw_ptr did not move (${_hp1}->${_hp2}) - the framework does not feed the PCM"
+        else
+            v WARN "audio/pcm-data-flowing" "PCM not running (state=${_st2:-?}), hw_ptr ${_hp1}->${_hp2} (nothing playing?)"
+        fi
+    else
+        v SKIP "audio/pcm-data-flowing" "no PCM status file"
+    fi
+    # the HDI must be the one holding the PCM
+    if ls -l /proc/*/fd 2>/dev/null | grep -aq '/dev/snd/pcmC0D0p'; then
+        v PASS "audio/hdi-owns-pcm" "pcmC0D0p opened by: $(ls -l /proc/*/fd 2>/dev/null | grep -a '/dev/snd/pcmC0D0p' | head -1 | sed -n 's/.*proc\/\([0-9]*\).*/pid \1/p')"
+    else
+        v WARN "audio/hdi-owns-pcm" "nobody holds /dev/snd/pcmC0D0p (no render open)"
+    fi
+    # the audio policy's current output device (needs a working hidumper)
+    _ahd="$W/.apol"
+    timeout_cmd 20 hidumper -s AudioPolicyService > "$_ahd" 2>&1
+    if grep -aq 'request error' "$_ahd" 2>/dev/null; then
+        v FAIL "audio/hidumper-audiopolicy" "hidumper denied (request error) - DUMP permission missing"
+    elif grep -aqE 'Speaker|speaker|DEVICE_TYPE' "$_ahd" 2>/dev/null; then
+        v PASS "audio/hidumper-audiopolicy" "$(grep -aiE 'active|selected|Speaker' "$_ahd" 2>/dev/null | head -2 | oneline)"
+    else
+        v WARN "audio/hidumper-audiopolicy" "hidumper -s AudioPolicyService gave no speaker info"
+    fi
+    rm -f "$_ahd" 2>/dev/null
+}
+
+# =============================================================================
+# D. 输入法 / IME
+# =============================================================================
+# C. 音频通路实测 / AUDIO PATH TEST (destructive)
+# =============================================================================
+# Splits the "no sound" problem into two halves with one command:
+#   * the kernel/ALSA/codec path  -> a tone played straight on the hardware
+#     PCM (hw:0,0).  The OHOS audio server must be stopped first because it
+#     holds /dev/snd/pcmC0D0p exclusively.
+#   * the OHOS framework path      -> if the hardware tone is audible but the
+#     framework still plays nothing, the fault is in the audio framework
+#     (HPAE / hdiadapter_new), not in SOF/ALC256.
+sec_audiotest() {
+    banner C/audiotest
+    hdr C_audiotest.txt "C. AUDIO PATH TEST (destructive: audio_host is stopped)"
+
+    _at="$W/C_audiotest.txt"
+    {
+        echo "--- state before ---"
+        cat /proc/asound/card0/pcm0p/sub0/status 2>/dev/null
+        amixer -c 0 cget name='Master Playback Volume' 2>&1
+        amixer -c 0 cget name='Speaker Playback Volume' 2>&1
+        amixer -c 0 cget name='Pre Mixer Analog Playback Volume' 2>&1
+        echo
+        echo "--- tone (1 kHz, 3 s) on the DEEPBUFFER PCM hw:0,31 (non destructive) ---"
+        # The SOF topology exposes a second playback DAI ("Deepbuffer HDA
+        # Analog", ALSA device 31) which audio_host does NOT hold, so the
+        # hardware path can be tested without stopping the audio server.
+        _try=0
+        _played=0
+        while [ "$_try" -lt 2 ]; do
+            speaker-test -D hw:0,31 -c 2 -t sine -f 1000 -l 1 -l 3 > "$W/.tone" 2>&1 &
+            _tp=$!
+            sleep 2
+            echo "--- PCM state while the tone is running (try $_try) ---"
+            cat /proc/asound/card0/pcm31p/sub0/status 2>/dev/null
+            cat /proc/asound/card0/pcm0p/sub0/status 2>/dev/null
+            wait "$_tp" 2>/dev/null
+            if grep -aqE 'Playing Wave|Playing WAVE|Sine' "$W/.tone" 2>/dev/null; then
+                _played=1
+                break
+            fi
+            grep -aqi 'Resource busy' "$W/.tone" 2>/dev/null || break
+            _try=$((_try + 1))
+        done
+        if [ "$_played" -eq 0 ]; then
+            echo "--- deepbuffer PCM unusable -> destructive path: stop audio_host ---"
+            param set audio_server.stop_audio_server 1 2>&1
+            _i=0
+            while [ "$_i" -lt 10 ]; do
+                [ -z "$(pidof audio_host 2>/dev/null)" ] && break
+                sleep 1
+                _i=$((_i + 1))
+            done
+            # at most ONE kill: init counts the restarts of a service and
+            # refuses to start it again after too many crashes
+            if [ -n "$(pidof audio_host 2>/dev/null)" ]; then
+                _p=$(pidof audio_host 2>/dev/null)
+                echo "audio_host still alive -> kill -9 $_p (once)"
+                kill -9 $_p 2>/dev/null
+                sleep 2
+            fi
+            echo "audio_host pid now: '$(pidof audio_host 2>/dev/null)'"
+            speaker-test -D hw:0,0 -c 2 -t sine -f 1000 -l 1 -l 3 > "$W/.tone" 2>&1
+            wait 2>/dev/null
+            echo "--- PCM state while the tone is running (hw:0,0) ---"
+            cat /proc/asound/card0/pcm0p/sub0/status 2>/dev/null
+            echo "--- restoring audio_host ---"
+            param set audio_server.restart_audio_server 1 2>&1
+            _i=0
+            while [ "$_i" -lt 30 ]; do
+                [ -n "$(pidof audio_host 2>/dev/null)" ] && break
+                sleep 1
+                _i=$((_i + 1))
+            done
+            if [ -z "$(pidof audio_host 2>/dev/null)" ]; then
+                # second chance: the boot-time job that starts the audio server
+                param set startup.service.ctl.audio_server 2 2>&1
+                _i=0
+                while [ "$_i" -lt 20 ]; do
+                    [ -n "$(pidof audio_host 2>/dev/null)" ] && break
+                    sleep 1
+                    _i=$((_i + 1))
+                done
+            fi
+            echo "audio_host pid now: '$(pidof audio_host 2>/dev/null)'"
+        fi
+        echo "--- speaker-test output ---"
+        cat "$W/.tone" 2>/dev/null
+        echo
+        echo "--- restart audio_host (init job audio_server:restart_audio_server) ---"
+        param set audio_server.restart_audio_server 1 2>&1
+        _i=0
+        while [ "$_i" -lt 20 ]; do
+            [ -n "$(pidof audio_host 2>/dev/null)" ] && break
+            sleep 1
+            _i=$((_i + 1))
+        done
+        echo "audio_host pid now: '$(pidof audio_host 2>/dev/null)'"
+    } >> "$_at" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    if grep -aqE 'Playing Wave|Playing WAVE|Sine' "$W/.tone" 2>/dev/null; then
+        v PASS "audio/kernel-tone-hw0" "speaker-test played on the hardware PCM (kernel/ALSA/codec path OK)"
+    else
+        v FAIL "audio/kernel-tone-hw0" "$(head -2 "$W/.tone" 2>/dev/null | oneline)"
+    fi
+    if grep -aq 'state: RUNNING' "$_at" 2>/dev/null; then
+        v PASS "audio/pcm-running-during-tone" "pcm0p was RUNNING while the tone played"
+    elif grep -aq 'state: PREPARED' "$_at" 2>/dev/null; then
+        v WARN "audio/pcm-running-during-tone" "pcm0p only PREPARED (no data written)"
+    else
+        v WARN "audio/pcm-running-during-tone" "PCM state unknown"
+    fi
+    if [ -n "$(pidof audio_host 2>/dev/null)" ]; then
+        v PASS "audio/hdi-restarted-after-test" "audio_host pid $(pidof audio_host 2>/dev/null)"
+    else
+        v FAIL "audio/hdi-restarted-after-test" "audio_host did not come back"
+    fi
+    rm -f "$W/.tone" 2>/dev/null
+}
+
+# =============================================================================
+sec_ime() {
+    banner D/ime
+    hdr D_ime.txt "D. INPUT METHOD (IME / rime / indicator)"
+
+    {
+        echo "--- ime -g (current IME) ---"
+        have ime && runsh "$W/D_ime_g.txt" "$T_CMD" 'ime -g 2>&1; echo ---; ime -h 2>&1 | head -60'
+        cat "$W/D_ime_g.txt" 2>/dev/null
+        echo
+        echo "--- ime params ---"
+        for p in persist.sys.inputmethod.enabled persist.sys.inputmethod \
+               persist.inputmethod.indicator enable.ime.inputmethod; do
+            echo "$p = $(param get $p 2>/dev/null)"
+        done
+        echo
+        echo "--- IME processes ---"
+        ps -A 2>/dev/null | grep -aiE 'rime|ime|inputmethod' || echo "(none)"
+        echo
+        echo "--- rime data dir ---"
+        ls -laR /data/service/el1/bundle/public/com.ohos.inputmethod.rime 2>/dev/null | head -80
+        find /data -maxdepth 8 -iname '*rime*' 2>/dev/null | head -60
+        echo
+        echo "--- IME logs on disk ---"
+        find /data/log /ohoslog -iname '*ime*' -o -iname '*rime*' 2>/dev/null | head -40
+    } >> "$W/D_ime.txt" 2>&1
+
+    {
+        echo
+        echo "--- hilog: ime / rime / indicator ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aiE 'ime|Ime|Rime|inputmethod|InputMethod|indicator|Indicator' \
+            | tail -400
+    } >> "$W/D_ime.txt" 2>&1
+}
+
+# =============================================================================
+# F. 性能 / Performance  (图形后端 + CPU 频率 + 负载)   [2026-10-21 新增]
+#
+# 目的：一次性取证"整机操作都卡"的系统级原因。
+#   F1 到底在用哪个 GL 后端（iris / zink / softpipe / llvmpipe）——最关键
+#   F2 CPU 频率与 governor（intel_pstate 是否锁在低频）
+#   F3 负载 / 内存 / 每进程 CPU%
+#   F4 DRM / xe 内核态状态
+#   F5 Mesa / EGL 日志 + RS 每帧日志噪声计数
+# 注意：设备上没有 awk / tr，全部用 sed/cut/grep 实现。
+# =============================================================================
+
+# 采样一次所有进程的 utime+stime（tick）
+cpu_snap() {
+    _out=$1
+    : > "$_out" 2>/dev/null
+    for _d in /proc/[0-9]*; do
+        [ -r "$_d/stat" ] || continue
+        _pid=${_d#/proc/}
+        _rest=$(sed 's/^.*) //' "$_d/stat" 2>/dev/null)
+        [ -n "$_rest" ] || continue
+        _u=$(echo "$_rest" | cut -d' ' -f12)
+        _s=$(echo "$_rest" | cut -d' ' -f13)
+        case "$_u" in ''|*[!0-9]*) continue;; esac
+        case "$_s" in ''|*[!0-9]*) _s=0;; esac
+        _n=$(cat "$_d/comm" 2>/dev/null)
+        echo "$_pid $(( _u + _s )) $_n" >> "$_out" 2>/dev/null
+    done
+}
+
+# 对比两次采样，算每进程 CPU%（相对单核，HZ 取 100）
+cpu_diff() {
+    _a=$1; _b=$2; _win=${3:-3}; _hz=100
+    echo "pid  ticks  cpu%($(echo "$_win" | cut -d. -f1)s, HZ=$_hz)  name"
+    while read -r _pid _t _n; do
+        _t2=$(grep "^$_pid " "$_b" 2>/dev/null | cut -d' ' -f2)
+        [ -n "$_t2" ] || continue
+        _d=$(( _t2 - _t ))
+        [ "$_d" -le 0 ] && continue
+        _pct=$(( _d * 100 / (_hz * _win) ))
+        echo "$_pid $_d ${_pct}% $_n"
+    done < "$_a" 2>/dev/null | sort -k2 -n -r | head -25
+}
+
+sec_perf() {
+    banner F/perf
+    hdr F_perf.txt "F. PERFORMANCE / GRAPHICS STACK"
+
+    # ---- F1 图形后端：最关键 ------------------------------------------------
+    {
+        echo "--- F1 graphics backend (MOST IMPORTANT) ---"
+        echo "--- hidumper RenderService -a gles (GL_RENDERER / GL_VERSION) ---"
+        runsh "$W/F_hidumper_gles.txt" "$T_CMD" 'hidumper -s RenderService -a gles 2>&1 | head -100'
+        cat "$W/F_hidumper_gles.txt" 2>/dev/null
+        echo
+        echo "--- hidumper RenderService -a screen (resolution / power / vsync) ---"
+        runsh "$W/F_hidumper_screen.txt" "$T_CMD" 'hidumper -s RenderService -a screen 2>&1 | head -200'
+        cat "$W/F_hidumper_screen.txt" 2>/dev/null
+        echo
+        echo "--- hidumper RenderService -a fps ---"
+        runsh "$W/F_hidumper_fps.txt" "$T_CMD" 'hidumper -s RenderService -a fps 2>&1 | head -100'
+        cat "$W/F_hidumper_fps.txt" 2>/dev/null
+        echo
+        echo "--- hidumper RenderService -a hitchs (掉帧) ---"
+        runsh "$W/F_hidumper_hitchs.txt" "$T_CMD" 'hidumper -s RenderService -a hitchs 2>&1 | head -300'
+        cat "$W/F_hidumper_hitchs.txt" 2>/dev/null
+    } >> "$W/F_perf.txt" 2>&1
+
+    # ---- F2 CPU 频率 / governor ---------------------------------------------
+    {
+        echo
+        echo "--- F2 CPU frequency / governor / intel_pstate ---"
+        echo "--- /sys/devices/system/cpu/cpu*/cpufreq ---"
+        for p in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
+            [ -d "$p" ] || continue
+            echo "== $p =="
+            for f in scaling_cur_freq scaling_min_freq scaling_max_freq \
+                     scaling_governor scaling_available_governors scaling_driver \
+                     cpuinfo_max_freq cpuinfo_min_freq; do
+                if [ -r "$p/$f" ]; then echo "  $f = $(cat "$p/$f" 2>/dev/null)"; fi
+            done
+        done
+        echo
+        echo "--- /sys/devices/system/cpu/cpufreq/policy* (intel_pstyle 视图) ---"
+        for p in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
+            [ -d "$p" ] || continue
+            echo "== $p =="
+            for f in scaling_cur_freq scaling_min_freq scaling_max_freq \
+                     scaling_governor scaling_available_governors \
+                     energy_performance_preference; do
+                if [ -r "$p/$f" ]; then echo "  $f = $(cat "$p/$f" 2>/dev/null)"; fi
+            done
+        done
+        echo
+        echo "--- /sys/devices/system/cpu/intel_pstate ---"
+        for f in /sys/devices/system/cpu/intel_pstate/*; do
+            [ -r "$f" ] && echo "  $(basename "$f") = $(cat "$f" 2>/dev/null)"
+        done
+        echo
+        echo "--- /sys/devices/system/cpu/cpuidle (idle 状态) ---"
+        for c in /sys/devices/system/cpu/cpu[0-9]*; do
+            [ -r "$c/cpuidle/state1/name" ] || continue
+            echo "  $(basename "$c") state1=$(cat "$c/cpuidle/state1/name" 2>/dev/null) disable=$(cat "$c/cpuidle/state1/disable" 2>/dev/null)"
+        done
+        echo
+        echo "--- /proc/cpuinfo (model / MHz) ---"
+        grep -aE "model name|^processor|cpu MHz" /proc/cpuinfo 2>/dev/null | head -80
+    } >> "$W/F_perf.txt" 2>&1
+
+    # ---- F3 负载 / 内存 / 每进程 CPU ----------------------------------------
+    {
+        echo
+        echo "--- F3 load / memory / per-process CPU% ---"
+        echo "--- /proc/loadavg ---"; cat /proc/loadavg 2>/dev/null
+        echo "--- /proc/uptime ---"; cat /proc/uptime 2>/dev/null
+        echo "--- uptime ---"; uptime 2>/dev/null
+        echo "--- free -m ---"; free -m 2>/dev/null || head -6 /proc/meminfo
+        echo "--- /proc/meminfo (head) ---"; head -12 /proc/meminfo 2>/dev/null
+        echo "--- top -b -n1 ---"; top -b -n 1 2>&1 | head -40
+        echo
+        echo "--- per-process CPU% over 3s (delta utime+stime; HZ assumed 100) ---"
+        cpu_snap "$W/.cpu1"
+        sleep 3
+        cpu_snap "$W/.cpu2"
+        cpu_diff "$W/.cpu1" "$W/.cpu2" 3
+        rm -f "$W/.cpu1" "$W/.cpu2" 2>/dev/null
+        echo
+        echo "--- key processes ---"
+        ps -A 2>/dev/null | grep -aE "render_service|sceneboard|web_render|appspawn|foundation|composer_host|display_manager|arkweb|surface" || echo "(none)"
+    } >> "$W/F_perf.txt" 2>&1
+
+    # ---- F4 DRM / xe / GPU 内核态 ------------------------------------------
+    {
+        echo
+        echo "--- F4 DRM / xe / GPU state ---"
+        echo "--- /dev/dri ---"; ls -la /dev/dri 2>/dev/null
+        echo "--- /sys/class/drm/card*-*/status ---"
+        for s in /sys/class/drm/card[0-9]*-*/status; do
+            [ -r "$s" ] && echo "  $s = $(cat "$s" 2>/dev/null)"
+        done
+        echo "--- card device ids ---"
+        for c in /sys/class/drm/card[0-9]*; do
+            [ -d "$c/device" ] || continue
+            echo "  $(basename "$c"): vendor=$(cat "$c/device/vendor" 2>/dev/null) device=$(cat "$c/device/device" 2>/dev/null)"
+            echo "     driver -> $(ls -l "$c/device/driver" 2>/dev/null | sed 's/.*-> //')"
+        done
+        echo "--- /sys/kernel/debug/dri/* (name / state / clients) ---"
+        for d in /sys/kernel/debug/dri/*; do
+            [ -d "$d" ] || continue
+            echo "== $d =="
+            for f in name state clients; do
+                if [ -r "$d/$f" ]; then echo "-- $f --"; head -80 "$d/$f" 2>/dev/null; fi
+            done
+        done
+        echo "--- lsmod (xe / i915 / drm) ---"; lsmod 2>/dev/null | grep -aiE "xe|i915|drm|gpu|ttm"
+        echo "--- dmesg | grep -i xe ---"
+        dmesg 2>/dev/null | grep -aiE "xe|drm|gpu|i915" | tail -250
+    } >> "$W/F_perf.txt" 2>&1
+
+    # ---- F5 Mesa / EGL 日志 + RS 每帧日志噪声 -------------------------------
+    {
+        echo
+        echo "--- F5 Mesa / EGL logs + RS per-frame log noise counters ---"
+        echo "--- hilog: MESA-OHOS ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a "MESA-OHOS" | head -120
+        echo "--- mesa log files ---"
+        for f in /data/service/el0/render_service/mesa_ohos.log \
+                 /data/service/el1/public/render_service/mesa_ohos.log \
+                 /data/local/shader_cache/local/system/render_service/mesa_ohos.log \
+                 /data/local/tmp/mesa_ohos.log \
+                 /tmp/mesa_ohos.log /data/mesa_dbg.txt; do
+            if [ -f "$f" ]; then
+                echo "== $f ($(wc -c < "$f" 2>/dev/null) B) =="
+                head -c 60000 "$f" 2>/dev/null
+                echo
+            fi
+        done
+        echo "--- hilog: EGL / GL / dri / swrast / iris / gallium ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aiE "egl|gles|OpenGL|dri2|swrast|iris|virgl|gallium|GL_RENDERER" | tail -150
+        echo
+        echo "--- hilog: RS per-frame log noise counters (whole ring buffer) ---"
+        for pat in "DrawCommSurfaceWatermark" "set color space fail" \
+                   "SetMetadata Failed" "Animation finish callback is not executed" \
+                   "DealWithSurfaceRotationAndGravity"; do
+            echo "  count('$pat') = $(timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac "$pat")"
+        done
+    } >> "$W/F_perf.txt" 2>&1
+
+    # ---- F6 显示管线 / 显示 HDI 每帧开销 / governor 生效情况 -----------------
+    {
+        echo
+        echo "--- F6 display pipeline per-frame cost + governor verification ---"
+
+        echo
+        echo "--- RS startup GL backend (from the render service itself) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a "GLBackend:" | tail -5
+
+        echo
+        echo "--- zz_perf result (what the boot service did) ---"
+        if [ -r /data/local/tmp/zz_perf_result.txt ]; then
+            cat /data/local/tmp/zz_perf_result.txt
+        else
+            echo "(zz_perf_result.txt missing: the zzperf service did not run)"
+        fi
+
+        echo
+        echo "--- governor now (after zz_perf) ---"
+        for p in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
+            [ -d "$p" ] || continue
+            g=$(cat "$p/scaling_governor" 2>/dev/null)
+            e=$(cat "$p/energy_performance_preference" 2>/dev/null)
+            c=$(cat "$p/scaling_cur_freq" 2>/dev/null)
+            mx=$(cat "$p/scaling_max_freq" 2>/dev/null)
+            echo "  $(basename "$p"): governor=$g epp=$e cur=$c max=$mx"
+        done
+        echo "  /sys/devices/system/cpu/intel_pstate:"
+        for f in /sys/devices/system/cpu/intel_pstate/no_turbo \
+                 /sys/devices/system/cpu/intel_pstate/min_perf_pct \
+                 /sys/devices/system/cpu/intel_pstate/max_perf_pct \
+                 /sys/devices/system/cpu/intel_pstate/status; do
+            [ -r "$f" ] && echo "    $(basename "$f") = $(cat "$f" 2>/dev/null)"
+        done
+
+        echo
+        echo "--- display HDI per-frame cost (counts over the hilog ring buffer) ---"
+        echo "  (one 'addfb ok' == one drmModeAddFB2 == one 23.6MB framebuffer created)"
+        for pat in "addfb ok" "can not add fb" "the gfx composition can not surpport" \
+                   "is not supported" "SetDisplayClientBuffer" "drmModeAtomicCommit failed"; do
+            echo "  count('$pat') = $(timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -ac "$pat")"
+        done
+
+        echo
+        echo "--- display buffer size in use (from the DISP cache log) ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -a "SetDisplayClientBuffer" | tail -8
+
+        echo
+        echo "--- active display mode (from the DRM connector) ---"
+        for m in /sys/class/drm/card[0-9]*-*/modes; do
+            [ -r "$m" ] || continue
+            echo "  $m:"
+            head -12 "$m" 2>/dev/null | sed 's/^/    /'
+        done
+        for e in /sys/class/drm/card[0-9]*-*/edid; do
+            [ -r "$e" ] && echo "  $e size=$(wc -c < "$e" 2>/dev/null) B"
+        done
+
+        echo
+        echo "--- display resolution as seen by the render service ---"
+        timeout_cmd 20 hidumper -s RenderService -a screen 2>&1 | head -40
+    } >> "$W/F_perf.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    # F1: which GL backend is really in use
+    if grep -aq 'request error' "$W/F_hidumper_gles.txt" 2>/dev/null; then
+        v SKIP "perf/gl-renderer" "hidumper has no DUMP permission (see the fixes section)"
+    else
+        _p_gl=$(sed -n 's/^GL_RENDERER: *//p' "$W/F_hidumper_gles.txt" 2>/dev/null | head -1)
+        if [ -z "$_p_gl" ]; then
+            v SKIP "perf/gl-renderer" "no GL_RENDERER line in the hidumper output"
+        else
+            case "$_p_gl" in
+                *swrast*|*llvmpipe*|*softpipe*)
+                    v FAIL "perf/gl-renderer" "$_p_gl (software rendering!)" ;;
+                *)
+                    v PASS "perf/gl-renderer" "$_p_gl" ;;
+            esac
+        fi
+    fi
+
+    _p_be=$(grep -a 'loader_get_driver_for_fd' "$W/F_perf.txt" 2>/dev/null | tail -1)
+    if grep -aq 'SOFTWARE RENDERING' "$W/F_perf.txt" 2>/dev/null; then
+        v FAIL "perf/gl-backend" "the Mesa driver fell back to SOFTWARE RENDERING"
+    elif echo "$_p_be" | grep -aq 'iris'; then
+        v PASS "perf/gl-backend" "the Mesa driver is iris (hardware)"
+    elif [ -n "$_p_be" ]; then
+        v WARN "perf/gl-backend" "the driver selection says: $_p_be"
+    else
+        v SKIP "perf/gl-backend" "no Mesa driver selection line (the mesa_ohos.log is missing)"
+    fi
+
+    # F1b: dropped frames
+    if grep -aq 'request error' "$W/F_hidumper_hitchs.txt" 2>/dev/null; then
+        v SKIP "perf/hitchs" "hidumper has no DUMP permission"
+    else
+        _p_h=$(sed -n 's/^more than 66 ms *//p' "$W/F_hidumper_hitchs.txt" 2>/dev/null | head -1)
+        case "$_p_h" in
+            ''|*[!0-9]*) v SKIP "perf/hitchs" "no 'more than 66 ms' counter in the hitchs dump" ;;
+            0)           v PASS "perf/hitchs" "0 frames slower than 66 ms" ;;
+            *)           v FAIL "perf/hitchs" "$_p_h frames slower than 66 ms" ;;
+        esac
+    fi
+
+    # F2: the governor
+    _p_gov=""
+    for _pg in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
+        [ -d "$_pg" ] || continue
+        _g=$(cat "$_pg/scaling_governor" 2>/dev/null)
+        [ -n "$_g" ] || continue
+        _p_gov="$_p_gov $(basename "$_pg")=$_g"
+    done
+    if [ -z "$_p_gov" ]; then
+        v SKIP "perf/cpu-governor" "no cpufreq policy on this kernel (intel_pstate active mode)"
+    elif echo "$_p_gov" | grep -aq 'performance'; then
+        v PASS "perf/cpu-governor" "performance on all policies ($_p_gov)"
+    else
+        v FAIL "perf/cpu-governor" "the governor is not performance ($_p_gov)"
+    fi
+
+    # F3: how much CPU does the render service burn
+    _p_rs=$(grep -a 'render_service' "$W/F_perf.txt" 2>/dev/null | grep -a '%' | head -1)
+    if [ -n "$_p_rs" ]; then
+        v PASS "perf/render-service-cpu" "$_p_rs"
+    else
+        v SKIP "perf/render-service-cpu" "render_service did not use any CPU in the 3 s window"
+    fi
+
+    # F4: is the display connected?
+    _p_drm=""
+    for _ds in /sys/class/drm/card[0-9]*-*/status; do
+        [ -r "$_ds" ] || continue
+        _p_drm="$_p_drm $(basename "$_ds")=$(cat "$_ds" 2>/dev/null)"
+    done
+    if [ -z "$_p_drm" ]; then
+        v SKIP "perf/drm-connected" "no /sys/class/drm/card*-*/status"
+    elif echo "$_p_drm" | grep -aq 'connected'; then
+        v PASS "perf/drm-connected" "$_p_drm"
+    else
+        v FAIL "perf/drm-connected" "no DRM connector is connected ($_p_drm)"
+    fi
+
+    # F5: the per-frame RS ERROR log flood
+    _p_ln=$(sed -n "s/^  count('DrawCommSurfaceWatermark') = //p" "$W/F_perf.txt" 2>/dev/null | head -1)
+    case "$_p_ln" in
+        ''|*[!0-9]*) v SKIP "perf/rs-log-noise" "no log-noise counter in the perf log" ;;
+        0)           v PASS "perf/rs-log-noise" "0 DrawCommSurfaceWatermark lines" ;;
+        *)           v FAIL "perf/rs-log-noise" "$_p_ln DrawCommSurfaceWatermark lines in the ring buffer" ;;
+    esac
+}
+
+# =============================================================================
+# WIFI - link layer, regulatory domain, power save and transfer speed
+# =============================================================================
+# Why this section exists: "apk download is extremely slow" was traced to the
+# kernel regulatory domain never being set (world domain => 5 GHz limited to
+# 20 MHz and DFS channels need a 60 s radar CAC) plus iwlwifi power save
+# never being disabled.  The fixes are in the image (see the "fixes"
+# section); this section proves whether they are ACTIVE and measures the
+# transfer phases (dns / connect / tls / ttfb / bulk) separately.
+sec_wifi() {
+    banner WIFI
+    hdr D_wifi.txt "WIFI - LINK LAYER, REGULATORY DOMAIN, TRANSFER SPEED"
+
+    {
+        echo "--- interfaces ---"
+        ls -la /sys/class/net 2>&1 | head -30
+        echo
+        echo "--- /proc/net/dev (wlan/eth counters) ---"
+        grep -aE 'wlan|eth' /proc/net/dev 2>/dev/null
+        echo
+        echo "--- /proc/net/wireless ---"
+        cat /proc/net/wireless 2>/dev/null || echo "(absent)"
+        echo
+        echo "--- ifconfig wlan0 ---"
+        ifconfig wlan0 2>&1 | head -20
+    } >> "$W/D_wifi.txt" 2>&1
+
+    # --- wifiprobe: the nl80211 state (the image has no "iw") ---------------
+    {
+        echo
+        echo "--- wifiprobe (reg domain / power save / link / station) ---"
+        if have wifiprobe; then
+            timeout_cmd 20 wifiprobe 2>&1
+            echo
+            echo "--- wifiprobe ps off (make it a no-op diagnostic, see below) ---"
+            echo "(NOT executed automatically: the zz_wifi_regdomain service already did it)"
+        else
+            echo "(wifiprobe NOT in the image -> the fix_net_perf tooling is missing)"
+        fi
+        echo
+        echo "--- iw (only present in the Terminal rootfs, not in /system) ---"
+        if have iw; then
+            timeout_cmd 10 iw dev wlan0 link 2>&1
+            timeout_cmd 10 iw dev wlan0 station dump 2>&1
+            timeout_cmd 10 iw dev wlan0 info 2>&1
+        else
+            echo "(no iw binary in /system - the wifiprobe output above is the substitute)"
+        fi
+    } >> "$W/D_wifi.txt" 2>&1
+
+    # --- the regulatory database + the parameters ---------------------------
+    {
+        echo
+        echo "--- regulatory.db (the kernel needs it to apply a real country) ---"
+        for _r in /system/lib/firmware/regulatory.db /lib/firmware/regulatory.db \
+                  /usr/lib/firmware/regulatory.db; do
+            [ -e "$_r" ] && echo "OK      $_r ($(wc -c < "$_r") B  sha=$(sha256sum "$_r" 2>/dev/null | cut -d' ' -f1))" \
+                          || echo "MISSING $_r"
+        done
+        echo
+        echo "--- parameters ---"
+        for _p in persist.sys.wifi.ps_mode persist.wifi.ps_mode \
+                  persist.sys.wifi.regdomain persist.wifi.country \
+                  persist.sys.wifi.hostapd_mode const.wifi.regdomain; do
+            echo "$_p = $(param get "$_p" 2>/dev/null)"
+        done
+        echo
+        echo "--- zz_wifi_regdomain service log ---"
+        dmesg 2>/dev/null | grep -aE 'ZZWIFI|regulatory|REGION|set reg' | tail -60
+    } >> "$W/D_wifi.txt" 2>&1
+
+    # --- the kernel side of the Wi-Fi driver -------------------------------
+    {
+        echo
+        echo "--- EARLY boot dmesg: iwlwifi / cfg80211 / regulatory ---"
+        for _wf in /sys_prod/dmesg_boot_t0.log /data/dmesg_boot_t0.log \
+                    /ohoslog/ptl-log/dmesg.boot.log; do
+            [ -f "$_wf" ] || continue
+            echo "=== $_wf"
+            grep -aiE 'iwlwifi|cfg80211|mac80211|regulatory|wlan' "$_wf" 2>/dev/null | head -150
+            break
+        done
+        echo
+        echo "--- live dmesg: iwlwifi / regulatory ---"
+        dmesg 2>/dev/null | grep -aiE 'iwlwifi|regulatory|cfg80211' | tail -80
+        echo
+        echo "--- the wifi HAL / driver client libraries ---"
+        for _l in /vendor/lib64/libwifi_hal_default.z.so /vendor/lib64/libwifi_driver_client.z.so \
+                  /vendor/lib64/libwifi_hal.z.so /vendor/lib64/libwifi_hdi_c_device.z.so; do
+            [ -e "$_l" ] && echo "OK      $_l ($(wc -c < "$_l") B)" || echo "MISSING $_l"
+        done
+        echo
+        echo "--- wifi processes ---"
+        ps -A 2>/dev/null | grep -aiE 'wifi|wlan' || echo "(none)"
+    } >> "$W/D_wifi.txt" 2>&1
+
+    # --- segmented transfer measurement -------------------------------------
+    # The image has no curl/wget, so the phases are measured with ping
+    # (dns + icmp rtt) and openssl s_client (tcp connect + tls handshake +
+    # bulk transfer).  When the Terminal rootfs (bash + curl) is available the
+    # full wifi_perf_probe.sh is used instead.
+    {
+        echo
+        echo "--- segmented transfer measurement ---"
+        _host="dl-cdn.alpinelinux.org"
+        _path="/alpine/v3.19/main/x86_64/APKINDEX.tar.gz"
+        if [ -r /data/local/tmp/wifi_perf_url ]; then
+            _u=$(cat /data/local/tmp/wifi_perf_url 2>/dev/null)
+            case "$_u" in
+                http*) _host=$(echo "$_u" | sed -e 's#^[a-zA-Z]*://##' -e 's#/.*##' -e 's#:.*##')
+                      _path=$(echo "$_u" | sed -e 's#^[a-zA-Z]*://[^/]*##') ;;
+            esac
+        fi
+        echo "target host = $_host"
+        echo "target path = $_path"
+        echo
+        echo "### phase 1: DNS + ICMP RTT"
+        timeout_cmd 20 ping -c 3 -W 3 "$_host" 2>&1 | head -12
+        echo
+        echo "### phase 2: TCP connect + TLS handshake (openssl s_client)"
+        { time timeout_cmd 20 openssl s_client -connect "$_host:443" -servername "$_host" -brief </dev/null ; } 2>&1 | tail -20
+        echo
+        echo "### phase 3: bulk transfer (HTTP GET over TLS, bytes + time)"
+        _req="$W/.req"
+        printf 'GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: ohos-diag\r\n\r\n' "$_path" "$_host" > "$_req" 2>/dev/null
+        { time timeout_cmd 40 openssl s_client -quiet -connect "$_host:443" -servername "$_host" < "$_req" 2>/dev/null ; } \
+            > "$W/.bulk" 2>"$W/.bulktime"
+        wc -c "$W/.bulk" 2>/dev/null | sed 's/^/bulk_bytes = /'
+        echo "--- timing ---"
+        cat "$W/.bulktime" 2>/dev/null
+        head -5 "$W/.bulk" 2>/dev/null
+        rm -f "$W/.bulk" "$W/.bulktime" "$_req" 2>/dev/null
+        echo
+        echo "### phase 4: the full probe script (needs bash + curl: Terminal rootfs)"
+        if [ -x /system/bin/wifi_perf_probe.sh ] && have bash; then
+            timeout_cmd 120 /system/bin/wifi_perf_probe.sh 2>&1 | head -120
+        else
+            echo "(bash/curl not available in this context - see the phases above)"
+            echo "(run 'bash /system/bin/wifi_perf_probe.sh' inside the Terminal rootfs for the full report)"
+        fi
+    } >> "$W/D_wifi.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    if have wifiprobe; then
+        _wp="$W/.wifiprobe"
+        timeout_cmd 20 wifiprobe > "$_wp" 2>&1
+        # wifiprobe prints:  "regulatory domain: <CC>"  and  "power_save: off|on"
+        _reg=$(sed -n 's/^regulatory domain: *//p' "$_wp" 2>/dev/null | head -1)
+        if [ -n "$_reg" ]; then
+            case "$_reg" in
+                00|'') v FAIL "wifi/regulatory-domain" "still the world domain (00) - the fix is not active" ;;
+                *)    v PASS "wifi/regulatory-domain" "the kernel uses the country code '$_reg'" ;;
+            esac
+        else
+            v WARN "wifi/regulatory-domain" "wifiprobe did not report a regulatory domain"
+        fi
+        if grep -aq '^power_save: off' "$_wp" 2>/dev/null; then
+            v PASS "wifi/power-save-off" "power save is disabled"
+        elif grep -aq '^power_save: on' "$_wp" 2>/dev/null; then
+            v FAIL "wifi/power-save-off" "power save is still ON"
+        else
+            v WARN "wifi/power-save-off" "wifiprobe did not report the power save state"
+        fi
+        # the link: wifiprobe only prints the "station:" block when a station
+        # is associated with an AP
+        if grep -aq '^station:' "$_wp" 2>/dev/null; then
+            _wl=$(grep -a 'signal ' "$_wp" 2>/dev/null | head -1)
+            _wb=$(grep -a 'tx_bitrate ' "$_wp" 2>/dev/null | head -1)
+            v PASS "wifi/link-associated" "associated ($_wl / $_wb)"
+        elif grep -aqE 'no station|not associated|GET_STATION failed' "$_wp" 2>/dev/null; then
+            v FAIL "wifi/link-associated" "no station is associated"
+        else
+            v WARN "wifi/link-associated" "wifiprobe printed no station block (no AP associated?)"
+        fi
+        rm -f "$_wp" 2>/dev/null
+    else
+        v FAIL "wifi/wifiprobe-present" "/system/bin/wifiprobe is missing"
+    fi
+    vfile PASS "wifi/regulatory-db" /system/lib/firmware/regulatory.db 1000
+    _wdm=/sys_prod/dmesg_boot_t0.log
+    [ -f "$_wdm" ] || _wdm=/data/dmesg_boot_t0.log
+    if [ -f "$_wdm" ]; then
+        vgrep PASS "wifi/boot-dmesg-has-iwlwifi" "$_wdm" 'iwlwifi|cfg80211'
+    else
+        v SKIP "wifi/boot-dmesg-has-iwlwifi" "no early dmesg file"
+    fi
+
+    # the segmented transfer: how many of the phases produced real data
+    _wph=0; _wphd=""
+    if grep -aq 'bytes from' "$W/D_wifi.txt" 2>/dev/null; then
+        _wph=$((_wph + 1)); _wphd="$_wphd dns/ping"
+    fi
+    if grep -aqE 'Protocol version|Verification' "$W/D_wifi.txt" 2>/dev/null; then
+        _wph=$((_wph + 1)); _wphd="$_wphd tls"
+    fi
+    _wbulk=$(sed -n 's/^bulk_bytes = //p' "$W/D_wifi.txt" 2>/dev/null | head -1)
+    case "$_wbulk" in
+        ''|*[!0-9]*) ;;
+        0) ;;
+        *) _wph=$((_wph + 1)); _wphd="$_wphd bulk($_wbulk B)" ;;
+    esac
+    if [ "$_wph" -ge 2 ]; then
+        v PASS "wifi/segmented-download" "$_wph/3 phases OK:$_wphd"
+    elif [ "$_wph" -eq 1 ]; then
+        v WARN "wifi/segmented-download" "only 1/3 phases produced data:$_wphd"
+    else
+        v SKIP "wifi/segmented-download" "no transfer phase produced data (no network?)"
+    fi
+}
+
+# =============================================================================
+# MEDIA - ArkWeb engine, video decode, media processes
+# =============================================================================
+# Why: "video only plays one or two frames".  The community Chromium 114 x86_64
+# engine has no libva, so H.264 is decoded in software and the CPU saturates.
+# This section proves which engine is installed, which processes are running
+# and how much CPU they burn.
+sec_media() {
+    banner MEDIA
+    hdr E_media.txt "MEDIA - ARKWEB ENGINE / VIDEO DECODE"
+
+    {
+        echo "--- the ArkWeb engine HAP ---"
+        for _h in /system/app/com.ohos.arkwebcore/ArkWebCore.hap \
+                  /system/app/*arkwebcore*/*.hap; do
+            [ -f "$_h" ] || continue
+            echo "=== $_h"
+            echo "    size   = $(wc -c < "$_h") B"
+            echo "    sha256 = $(sha256sum "$_h" 2>/dev/null | cut -d' ' -f1)"
+            echo "    mtime  = $(ls -la "$_h" 2>/dev/null)"
+        done
+        echo
+        echo "--- the installed engine (from BMS) ---"
+        if have bm; then
+            timeout_cmd 20 bm dump -n com.ohos.arkwebcore 2>&1 | head -60
+        fi
+        echo
+        echo "--- the engine shared object on disk ---"
+        find /data -name 'libarkweb_engine.so' 2>/dev/null | head -10
+        for _s in $(find /data -name 'libarkweb_engine.so' 2>/dev/null | head -3); do
+            echo "=== $_s ($(wc -c < "$_s" 2>/dev/null) B)"
+        done
+        echo
+        echo "--- the engine version strings ---"
+        for _s in $(find /data -name 'libarkweb_engine.so' 2>/dev/null | head -1); do
+            strings "$_s" 2>/dev/null | grep -aE '^(Chrome|Chromium)/[0-9]+\.|ArkWeb/[0-9]' | head -10
+        done
+        echo
+        echo "--- the decoders the engine actually contains (hevc/h264/vp9/av1) ---"
+        for _s in $(find /data -name 'libarkweb_engine.so' 2>/dev/null | head -1); do
+            for _d in hevc h265 h264 avc1 vp9 av1; do
+                _n=$(strings "$_s" 2>/dev/null | grep -aic "$_d")
+                echo "  $_d : $_n hit(s)"
+            done
+        done
+        echo "--- the ffmpeg decoder table (the authoritative decoder list) ---"
+        for _s in $(find /data -name 'libarkweb_engine.so' 2>/dev/null | head -1); do
+            strings "$_s" 2>/dev/null | grep -aoE 'ff_[a-z0-9_]+_decoder' | sort -u | head -40
+        done
+    } >> "$W/E_media.txt" 2>&1
+
+    # --- hardware video decode ---------------------------------------------
+    {
+        echo
+        echo "--- hardware decode (VA-API) availability ---"
+        ls -la /dev/dri 2>&1 | head -10
+        for _v in /usr/lib64/libva.so.2 /usr/lib64/libva.so /system/lib64/libva.so.2 \
+                  /vendor/lib64/libva.so.2; do
+            [ -e "$_v" ] && echo "OK      $_v" || echo "MISSING $_v"
+        done
+        echo "--- the DRM render nodes ---"
+        for _r in /sys/class/drm/renderD*; do
+            [ -e "$_r" ] && echo "  $_r -> $(readlink -f "$_r/driver" 2>/dev/null)"
+        done
+    } >> "$W/E_media.txt" 2>&1
+
+    # --- the media / web processes and their CPU share ----------------------
+    {
+        echo
+        echo "--- media / web processes ---"
+        ps -A 2>/dev/null | grep -aiE 'web_render|nwebspawn|render_process|arkweb|browser|media|player' || echo "(none)"
+        echo
+        echo "--- per-process CPU% (3 s window, same method as the perf section) ---"
+        cpu_snap "$W/.m1"
+        sleep 3
+        cpu_snap "$W/.m2"
+        cpu_diff "$W/.m1" "$W/.m2" 3
+        rm -f "$W/.m1" "$W/.m2" 2>/dev/null
+    } >> "$W/E_media.txt" 2>&1
+
+    # --- the media / arkweb log lines ---------------------------------------
+    {
+        echo
+        echo "--- hilog: arkweb / ffmpeg / video / codec / media ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null \
+            | grep -aiE 'arkweb|ffmpeg|video|codec|media|web_render|nwebspawn|libyuv|vpx|openh264' \
+            | tail -400
+        echo
+        echo "--- hilog: the media domains (0xD002B8x / 0xD002B3F / 0xD002B71) ---"
+        timeout_cmd "$T_HILOG" hilog -x -D 0xD002B82,0xD002B83,0xD002B84,0xD002B87,0xD002B88,0xD002B89,0xD002B8B,0xD002B8C,0xD002B3F,0xD002B71 2>&1 | tail -300
+        echo
+        echo "--- the arkweb crash handler logs ---"
+        find /data/log -iname '*arkweb*' -o -iname '*nweb*' -o -iname '*web_render*' 2>/dev/null | head -30
+    } >> "$W/E_media.txt" 2>&1
+
+    # --- verdicts ------------------------------------------------------------
+    vfile PASS "media/arkwebcore-hap" /system/app/com.ohos.arkwebcore/ArkWebCore.hap 1000000
+    _eng=$(find /data -name 'libarkweb_engine.so' 2>/dev/null | head -1)
+    if [ -n "$_eng" ]; then
+        v PASS "media/engine-so-present" "$_eng ($(wc -c < "$_eng" 2>/dev/null) B)"
+    else
+        v FAIL "media/engine-so-present" "libarkweb_engine.so not found under /data"
+    fi
+    if [ -e /usr/lib64/libva.so.2 ] || [ -e /vendor/lib64/libva.so.2 ] || [ -e /system/lib64/libva.so.2 ]; then
+        v PASS "media/vaapi-present" "a libva is present (hardware decode possible)"
+    else
+        v WARN "media/vaapi-present" "no libva -> H.264 is decoded in software (CPU bound)"
+    fi
+    if ps -A 2>/dev/null | grep -aq 'web_render'; then
+        v PASS "media/web-render-running" "the web_render process exists"
+    else
+        v SKIP "media/web-render-running" "no web_render process (no page open?)"
+    fi
+
+    # the engine version
+    _m_ver=$(grep -aE '^(Chrome|Chromium)/[0-9]+\.' "$W/E_media.txt" 2>/dev/null | head -1)
+    if [ -z "$_m_ver" ]; then
+        _m_ver=$(grep -aE '^ArkWeb/[0-9]' "$W/E_media.txt" 2>/dev/null | head -1)
+    fi
+    if [ -n "$_m_ver" ]; then
+        v PASS "media/engine-version" "$_m_ver"
+    else
+        v SKIP "media/engine-version" "no version string in the engine"
+    fi
+
+    # HEVC: the ffmpeg decoder table is authoritative, the plain string hits
+    # are only a hint
+    _m_hevc=0
+    if grep -aq 'ff_hevc_decoder' "$W/E_media.txt" 2>/dev/null; then
+        _m_hevc=1
+    fi
+    _m_hevcstr=$(sed -n 's/^  hevc : //p' "$W/E_media.txt" 2>/dev/null | head -1)
+    if [ "$_m_hevc" = 1 ]; then
+        v PASS "media/hevc-decoder" "the engine contains ff_hevc_decoder (HEVC decodable)"
+    elif [ -z "$_eng" ]; then
+        v SKIP "media/hevc-decoder" "the engine is not installed - nothing to inspect"
+    elif [ -n "$_m_hevcstr" ] && [ "$_m_hevcstr" != 0 ]; then
+        v WARN "media/hevc-decoder" "no ff_hevc_decoder, but $_m_hevcstr hevc string hits (HEVC probably NOT decodable)"
+    else
+        v WARN "media/hevc-decoder" "the engine has no HEVC decoder (HEVC streams are dropped)"
+    fi
+
+    # ArkWeb decode errors in the log
+    _m_err=$(grep -acE 'unsupported video decoder type|HEVC decoding is not supported' "$W/E_media.txt" 2>/dev/null)
+    case "$_m_err" in
+        ''|*[!0-9]*) _m_err=0 ;;
+    esac
+    if [ "$_m_err" -gt 0 ]; then
+        v FAIL "media/arkweb-decode-errors" "$_m_err decode errors in the log"
+    else
+        v PASS "media/arkweb-decode-errors" "no decode errors in the log"
+    fi
+
+    # --- HEVC guard (浏览器侧的"屏蔽 HEVC + 取流参数改写"保护) --------------
+    # 背景：x86_64 的 ArkWeb 引擎（社区 Chromium 114）没有 HEVC 解码器，站点
+    # （B 站）下发 HEVC 轨时播放器只剩音轨、极卡。浏览器侧装上守卫后，站点只能
+    # 拿到 AVC 轨。守卫的落地方式：
+    #   * Aira  → 镜像里 /system/etc/aira_codec_guard.conf（inject.sh 写的标记）
+    #              或 Aira.hap 里带 'aira-codec-guard-v1' 字面量
+    #   * 自带浏览器 → Browser.hap 里带 '__ohBrowserCodecGuard' 字面量
+    _m_aira_conf=/system/etc/aira_codec_guard.conf
+    _m_aira_hap=/system/app/org.aira.browser/Aira.hap
+    _m_br_hap=/system/app/com.ohos.browser/Browser.hap
+    if [ -f "$_m_aira_conf" ]; then
+        _m_agv=$(sed -n 's/^guard_version=//p' "$_m_aira_conf" 2>/dev/null | head -1)
+        _m_ash=$(sed -n 's/^hap_sha256=//p' "$_m_aira_conf" 2>/dev/null | head -1 | cut -c1-12)
+        if [ -n "$_m_agv" ]; then
+            v PASS "media/aira-hevc-guard" "Aira HEVC guard installed ($_m_agv, hap sha ${_m_ash})"
+        else
+            v WARN "media/aira-hevc-guard" "$_m_aira_conf exists but has no guard_version"
+        fi
+    elif [ -f "$_m_aira_hap" ] && grep -aq 'aira-codec-guard-v1' "$_m_aira_hap" 2>/dev/null; then
+        v PASS "media/aira-hevc-guard" "the Aira HAP carries the HEVC guard (no marker file)"
+    elif [ -f "$_m_aira_hap" ]; then
+        v WARN "media/aira-hevc-guard" "the Aira HAP has no HEVC guard (HEVC streams are dropped)"
+    else
+        v SKIP "media/aira-hevc-guard" "Aira is not installed"
+    fi
+
+    if [ -f "$_m_br_hap" ] && grep -aq '__ohBrowserCodecGuard' "$_m_br_hap" 2>/dev/null; then
+        v PASS "media/browser-hevc-guard" "the system browser carries the HEVC guard"
+    elif [ -f "$_m_br_hap" ]; then
+        v WARN "media/browser-hevc-guard" "the system browser has no HEVC guard"
+    else
+        v SKIP "media/browser-hevc-guard" "the system browser is not installed"
+    fi
+}
+
+# =============================================================================
+# HWDEC - the oneVPL / VA-API / iHD hardware video decode probe
+# =============================================================================
+# Why: "the video only plays one or two frames" - the community Chromium 114
+# engine has no libva, so H.264 is decoded in software and the CPU saturates.
+# The hwdec_probe init service (device/pc/ptl/hwdec_probe) drives the oneVPL
+# stack directly and writes a verdict line into /sys_prod/hwdec_probe.log.
+# This section collects that log verbatim and turns it into PASS/FAIL.
+sec_hwdec() {
+    banner HWDEC
+    hdr H_hwdec.txt "HWDEC - HARDWARE VIDEO DECODE PROBE (oneVPL / VA-API / iHD)"
+
+    _hlog=""
+    for _c in /sys_prod/hwdec_probe.log \
+              /data/local/tmp/hwdec_probe.log \
+              /proc/1/root/sys_prod/hwdec_probe.log \
+              /proc/1/root/data/local/tmp/hwdec_probe.log; do
+        if [ -f "$_c" ]; then _hlog=$_c; break; fi
+    done
+
+    {
+        echo "--- the probe log (raw, also copied to H_hwdec_probe.log) ---"
+        if [ -n "$_hlog" ]; then
+            echo "source : $_hlog"
+            echo "size   : $(wc -c < "$_hlog" 2>/dev/null) B"
+            echo "mtime  : $(ls -la "$_hlog" 2>/dev/null)"
+            echo
+            cp -f "$_hlog" "$W/H_hwdec_probe.log" 2>/dev/null
+            cat "$W/H_hwdec_probe.log" 2>/dev/null
+        else
+            echo "(no probe log in /sys_prod or /data/local/tmp)"
+            echo "=> the 'hwdec_probe' init service has not run on this device yet,"
+            echo "   or it could not open its log file."
+        fi
+        echo
+        echo "--- the probe binary and its init service ---"
+        ls -la /system/bin/hwdec_probe /system/bin/hwdec_probe.sh 2>&1
+        echo "init.svc.hwdec_probe       = $(param get init.svc.hwdec_probe 2>&1)"
+        echo "init.svc.hwdec_probe.start = $(param get init.svc.hwdec_probe.start 2>&1)"
+        echo
+        echo "--- the hardware decode stack (oneVPL / VA-API / iHD / libdrm) ---"
+        for _f in /vendor/lib64/libva.so.2 /vendor/lib64/libva-drm.so.2 \
+                  /vendor/lib64/libmfx-gen.so.1.2 /vendor/lib64/libigdgmm.so.12 \
+                  /vendor/lib64/libdrm.so.2 /vendor/lib64/dri/iHD_drv_video.so; do
+            if [ -e "$_f" ]; then
+                echo "OK      $_f  ($(wc -c < "$_f" 2>/dev/null) B)"
+            else
+                echo "MISSING $_f"
+            fi
+        done
+        echo
+        echo "--- the DRM render nodes (the GPU the decoder must use) ---"
+        ls -la /dev/dri 2>&1
+        for _r in /sys/class/drm/renderD*; do
+            [ -e "$_r" ] && echo "  $_r -> $(readlink -f "$_r/driver" 2>/dev/null)"
+        done
+        echo
+        echo "--- hilog: the HWDEC tag ---"
+        timeout_cmd "$T_HILOG" hilog -x 2>/dev/null | grep -a 'HWDEC' | tail -60
+    } >> "$W/H_hwdec.txt" 2>&1
+
+    # ---- verdicts ----------------------------------------------------------
+    if [ -z "$_hlog" ]; then
+        v SKIP "hwdec/probe-log-present" "no /sys_prod/hwdec_probe.log and no /data/local/tmp/hwdec_probe.log"
+        v SKIP "hwdec/result"           "no probe log -> unknown"
+        v SKIP "hwdec/decoded-frames"   "no probe log -> unknown"
+        v SKIP "hwdec/cpu-ratio"        "no probe log -> unknown"
+        v SKIP "hwdec/implementations"  "no probe log -> unknown"
+        v SKIP "hwdec/failure-reason"   "no probe log -> unknown"
+    else
+        v PASS "hwdec/probe-log-present" "$_hlog ($(wc -c < "$_hlog" 2>/dev/null) B)"
+
+        _hres=$(sed -n 's/.*HWDEC: RESULT=\([A-Z][A-Z]*\).*/\1/p' "$_hlog" 2>/dev/null | tail -1)
+        _hfr=$(sed -n 's/.*decoded_frames=\([0-9][0-9]*\).*/\1/p' "$_hlog" 2>/dev/null | tail -1)
+        _hreason=$(sed -n 's/.*reason=\([A-Za-z_][A-Za-z_0-9]*\).*/\1/p' "$_hlog" 2>/dev/null | tail -1)
+        _himpl=$(sed -n 's/.*implementations found=\([0-9][0-9]*\).*/\1/p' "$_hlog" 2>/dev/null | tail -1)
+        _hcpu=$(sed -n 's/.*cpu_ratio=\([0-9][0-9.]*\)\(%\).*/\1/p' "$_hlog" 2>/dev/null | tail -1)
+        _hsum=$(grep -a 'HWDEC: SUMMARY' "$_hlog" 2>/dev/null | tail -1)
+
+        case "$_hres" in
+            OK)
+                v PASS "hwdec/result" "the probe reports RESULT=OK"
+                ;;
+            FAIL)
+                v FAIL "hwdec/result" "the probe reports RESULT=FAIL${_hreason:+ (reason=$_hreason)}"
+                ;;
+            '')
+                v SKIP "hwdec/result" "the probe log has no RESULT line"
+                ;;
+            *)
+                v FAIL "hwdec/result" "unexpected RESULT=$_hres"
+                ;;
+        esac
+
+        case "$_hfr" in
+            ''|*[!0-9]*) v SKIP "hwdec/decoded-frames" "no decoded_frames= in the probe log" ;;
+            0)           v FAIL "hwdec/decoded-frames" "decoded_frames=0 - nothing was decoded" ;;
+            *)           v PASS "hwdec/decoded-frames" "decoded_frames=$_hfr" ;;
+        esac
+
+        if [ -n "$_hcpu" ]; then
+            v PASS "hwdec/cpu-ratio" "cpu_ratio=${_hcpu}% (${_hsum})"
+        else
+            v SKIP "hwdec/cpu-ratio" "no SUMMARY/cpu_ratio in the probe log"
+        fi
+
+        case "$_himpl" in
+            ''|*[!0-9]*) v SKIP "hwdec/implementations" "no 'implementations found=' in the probe log" ;;
+            0)           v FAIL "hwdec/implementations" "oneVPL found 0 implementations (no VA-API driver)" ;;
+            *)           v PASS "hwdec/implementations" "oneVPL implementations found=$_himpl" ;;
+        esac
+
+        if [ -n "$_hreason" ]; then
+            v FAIL "hwdec/failure-reason" "reason=$_hreason"
+        else
+            v PASS "hwdec/failure-reason" "no failure reason (the probe did not fail)"
+        fi
+    fi
+
+    if [ -x /system/bin/hwdec_probe ]; then
+        v PASS "hwdec/probe-binary" "/system/bin/hwdec_probe ($(wc -c < /system/bin/hwdec_probe 2>/dev/null) B)"
+    else
+        v SKIP "hwdec/probe-binary" "/system/bin/hwdec_probe is missing"
+    fi
+
+    _hsvc=$(param get init.svc.hwdec_probe 2>/dev/null)
+    case "$_hsvc" in
+        running)
+            v PASS "hwdec/init-service" "init.svc.hwdec_probe = running" ;;
+        ''|*fail*|*rror*|*'not found'*|*106*)
+            # 'param get' prints an error message (not an empty string) when the
+            # parameter does not exist.  The service is declared "once": 1, so
+            # init removes its parameter as soon as it has finished - the log
+            # is the real evidence in that case.
+            if [ -n "$_hlog" ]; then
+                v PASS "hwdec/init-service" "the one-shot service already finished (the log is there)"
+            else
+                v SKIP "hwdec/init-service" "init.svc.hwdec_probe is not registered and there is no log"
+            fi ;;
+        *)
+            v FAIL "hwdec/init-service" "init.svc.hwdec_probe = $_hsvc" ;;
+    esac
+
+    _hsn=0
+    for _f in /vendor/lib64/libva.so.2 /vendor/lib64/libmfx-gen.so.1.2 \
+              /vendor/lib64/dri/iHD_drv_video.so; do
+        [ -e "$_f" ] && _hsn=$((_hsn + 1))
+    done
+    if [ "$_hsn" = 3 ]; then
+        v PASS "hwdec/va-stack" "libva + libmfx-gen + iHD_drv_video are all in /vendor/lib64"
+    elif [ "$_hsn" = 0 ]; then
+        v SKIP "hwdec/va-stack" "no oneVPL/VA-API libraries in /vendor/lib64 (the stack is not deployed)"
+    else
+        v FAIL "hwdec/va-stack" "only $_hsn of 3 oneVPL/VA-API libraries are present"
+    fi
+}
+
+# =============================================================================
+# E. 系统 / System
+# =============================================================================
+sec_system() {
+    banner E/system
+    hdr E_system.txt "E. SYSTEM"
+
+    {
+        echo "--- build id ---"
+        cat /system/etc/ohos_build_id 2>/dev/null
+        echo
+        echo "--- /proc/cmdline ---"
+        cat /proc/cmdline 2>/dev/null
+        echo
+        echo "--- /proc/version / cpuinfo (first 40) ---"
+        cat /proc/version 2>/dev/null
+        head -40 /proc/cpuinfo 2>/dev/null
+        echo
+        echo "--- mounts ---"
+        cat /proc/mounts 2>/dev/null
+        echo
+        echo "--- dmesg: ZZDRM / module / drm / display ---"
+        dmesg 2>/dev/null | grep -iaE 'ZZDRM|module|drm|xe |i915|display|composer' | tail -300
+        echo
+        echo "--- dmesg: errors/oops ---"
+        dmesg 2>/dev/null | grep -iaE 'oops|BUG:|Call Trace|kernel panic|taint|Call trace' | tail -120
+        echo
+        echo "--- /proc/modules ---"
+        cat /proc/modules 2>/dev/null
+        echo
+        echo "--- pstore ---"
+        ls -la /sys/fs/pstore 2>/dev/null || echo "(absent)"
+        for f in /sys/fs/pstore/*; do
+            [ -f "$f" ] || continue
+            echo "=== $f ($(wc -c < "$f") B) ==="
+            head -c 200000 "$f"
+            echo
+        done
+        echo "--- /dev/pmsg0 / /dev/kmsg head ---"
+        ls -la /dev/pmsg0 /dev/kmsg 2>/dev/null
+        echo
+        echo "--- part_init log / boot log ---"
+        for f in /ohoslog/ptl-log/part_init.txt /ohoslog/ptl-log/dmesg.boot.log \
+                 /data/ohos-log/boot.log; do
+            [ -f "$f" ] && { echo "=== $f ==="; head -c 100000 "$f"; echo; }
+        done
+        echo
+        echo "--- GRUB / cmdline evidence ---"
+        ls -la /boot 2>/dev/null
+        echo
+        echo "--- df -h ---"
+        df -h 2>&1
+        echo
+        echo "--- faultlog ---"
+        ls -laR /data/log/faultlog 2>/dev/null | head -200
+        find /data/log/faultlog -type f 2>/dev/null | head -80
+        echo "--- warninglog ---"
+        ls -la /data/log/warninglog 2>/dev/null || echo "(absent)"
+        find /data/log/warninglog -type f 2>/dev/null | head -40
+        echo "--- appfreeze / freeze ---"
+        find /data/log -type f \( -iname '*freeze*' -o -iname '*anr*' \) 2>/dev/null | head -40
+        echo
+        echo "--- reboot / poweroff reason ---"
+        cat /proc/poweroff_reason 2>/dev/null
+        for p in persist.sys.boot.reason persist.sys.poweroff.reason persist.dfx.eventtype \
+                 persist.dfx.shutdownactiontime persist.dfx.shutdowncompletetime; do
+            echo "$p = $(param get $p 2>/dev/null)"
+        done
+        echo
+        echo "--- installed bundles ---"
+        have bm && runsh "$W/E_bm_dump.txt" "$T_CMD" 'bm dump -a 2>&1 | head -3000'
+        have bm && runsh /dev/null "$T_CMD" 'bm dump -n com.ohos.sceneboard 2>&1 | head -300'
+        echo "(bm dump saved to E_bm_dump.txt)"
+    } >> "$W/E_system.txt" 2>&1
+
+    # full hilog dump (skipped in quick mode)
+    if [ "$KEEP_HILOG_RAW" = 1 ]; then
+        echo "--- full hilog dump -> E_hilog.txt ---" >> "$W/E_system.txt" 2>&1
+        runsh "$W/_hl.log" "$T_HILOG" "hilog -x > '$W/E_hilog.txt' 2>&1; wc -l '$W/E_hilog.txt'"
+        cat "$W/_hl.log" >> "$W/E_system.txt" 2>/dev/null
+        rm -f "$W/_hl.log" 2>/dev/null
+        [ -f "$W/E_hilog.txt" ] || echo "(hilog dump failed)" >> "$W/E_system.txt"
+    fi
+
+    # full dmesg
+    dmesg > "$W/E_dmesg.txt" 2>/dev/null
+    ps -A > "$W/E_ps.txt" 2>/dev/null
+
+    # the hilog persistence tasks (written by zz_hilog_persist) - these hold
+    # the content that the 5000 line ring buffer has already thrown away
+    mkdir -p "$W/E_hilog_persist" 2>/dev/null
+    {
+        echo "--- hilog persist tasks ---"
+        timeout_cmd 10 hilog -w query 2>&1
+        echo
+        echo "--- /data/log/hilog ---"
+        ls -la /data/log/hilog 2>&1
+    } >> "$W/E_system.txt" 2>&1
+    for _f in /data/log/hilog/bt_stack* /data/log/hilog/btstack* \
+              /data/log/hilog/audio* /data/log/hilog/wifi* /data/log/hilog/kmsg*; do
+        [ -f "$_f" ] || continue
+        _b=$(basename "$_f")
+        head -c 400000 "$_f" > "$W/E_hilog_persist/$_b" 2>/dev/null
+    done
+}
+
+# ---- timeout helper used before it is defined above (sh resolves at call) ----
+timeout_cmd() {
+    _t=$1; shift
+    if have timeout; then timeout "$_t" "$@"; else "$@"; fi
+}
+
+# =============================================================================
+# VERDICT TABLE - the one file the operator has to read
+# =============================================================================
+# The spec lists, in the order the operator cares about, every checked item:
+#
+#     CATEGORY | verdict-key | what it means | what we expect
+#
+# The builder looks every key up in the flat verdict.  A key that was never
+# emitted (its section did not run, or the file/command was missing) becomes
+# SKIP - the tool never fails because of a missing input.
+VSPEC='桌面|desktop/sceneboard-running|SceneBoard 进程|进程存在
+桌面|desktop/desktop-icons|桌面图标 (gridlayout_info)|>=1 行
+桌面|desktop/app-center|应用中心 (app_center_layout_info)|>=1 行
+桌面|desktop/pc-mode-table|PC 模式布局表 (pc_mode_gridlayout_info)|非空或由 gridlayout 兜底
+桌面|desktop/taskpool-stuck|taskpool 堆积|0 条
+桌面|desktop/sceneboard-crash|SceneBoard 崩溃/异常|无 faultlog
+桌面|desktop/layoutinfo-rawfile|layoutInfo.json 预置配置|存在且非空
+音频|audio/sofhdadsp-card-present|声卡 sofhdadsp|/proc/asound/cards 可见
+音频|audio/pcm-devices|ALSA PCM 设备|存在
+音频|audio/master-playback-volume|Master 音量控件|存在
+音频|audio/master-ctrl-unmuted|Master 音量未静音|值>0 且 mute=0
+音频|audio/speaker-output-pcm-present|扬声器输出 PCM|播放 PCM 存在（SOF 卡上叫 HDA Analog，无名为 Speaker 的 PCM）
+音频|audio/aplay-null-playback|aplay -D null|alsa+PCM 通路可用
+音频|audio/aplay-default-playback|aplay -D default|播放成功，或设备被 audio_host 独占(Resource busy，非故障)
+音频|audio/device-exclusive-owner|设备独占者|audio_host 运行中
+音频|audio/zz-sof-reprobe-ran|SOF 重探测 (ZZSOF)|有诊断输出
+音频|audio/boot-dmesg-has-sof|开机 dmesg 含 SOF|有
+音频|audio/sof-topology-in-dmesg|SOF 拓扑文件名|开机 dmesg 有 Topology file
+音频|audio/sof-topology-file-present|SOF 拓扑文件在镜像里|存在于 /system/lib/firmware
+音频|audio/speaker-on-hda-codec|扬声器在 HDA codec 上|ALC* type:speaker
+音频|audio/speaker-ctrl-unmuted|Speaker 控件|存在、未静音、值>0
+音频|audio/sof-pre-mixer-nonzero|SOF Pre 混音器|非 0（0=数字静音）
+音频|audio/sof-post-mixer-nonzero|SOF Post 混音器|非 0（0=数字静音）
+音频|audio/sof-dai-mixer-nonzero|SOF Deepbuffer 混音器|非 0（0=数字静音）
+音频|audio/pcm0p-state|播放 PCM 状态|可读（state/owner_pid）
+音频|audio/pcm-data-flowing|PCM 是否有数据流动|播放中 hw_ptr 递增（框架确实在喂 PCM）
+音频|audio/hdi-owns-pcm|HDI 持有 PCM|audio_host 打开 pcmC0D0p
+音频|audio/hidumper-audiopolicy|audio policy 输出设备|hidumper -s AudioPolicyService 可用
+音频|audio/kernel-tone-hw0|硬件直通发声测试|hw:0,0 能播（内核通路 OK）
+音频|audio/pcm-running-during-tone|发声中 PCM 状态|RUNNING
+音频|audio/hdi-restarted-after-test|测试后 audio_host|已恢复
+蓝牙|bt/hci-device-present|hci0 蓝牙设备|/sys/class/bluetooth 可见
+蓝牙|bt/vendor-hal-log|vendor HAL 日志|bt_vendor.log 存在
+蓝牙|bt/libbtstack-mapped|协议栈已加载|libbtstack 已映射
+蓝牙|bt/libbt-vendor-mapped|vendor HAL 已加载|libbt_vendor 已映射
+蓝牙|bt/bluetooth_service-running|bluetooth_service|运行中
+蓝牙|bt/hilog-domain-has-lines|BT 栈日志内容|非空
+蓝牙|bt/bt-enable-tool|蓝牙开关触发器|/system/bin/bt_enable 已安装
+蓝牙|bt/chain-enable-request|链路 L0 请求到达框架|有
+蓝牙|bt/chain-adapter-enabled|链路 L1 服务使能适配器|有
+蓝牙|bt/chain-hci-init|链路 L2 协议栈 HCI_Initialize|有
+蓝牙|bt/chain-hdi-init|链路 L3 HDF 代理初始化|有
+蓝牙|bt/chain-vendor-hal-dlopen|链路 L4 vendor HAL 被 dlopen|有
+蓝牙|bt/chain-vendor-hal-alive|链路 L5 vendor HAL 有日志|有
+蓝牙|bt/boot-dmesg-has-bt-probe|开机 dmesg 含 BT probe|有
+Wi-Fi|wifi/regulatory-domain|内核 regulatory domain|非 00 (如 CN)
+Wi-Fi|wifi/power-save-off|Wi-Fi 省电|off
+Wi-Fi|wifi/regulatory-db|regulatory.db|存在
+Wi-Fi|wifi/link-associated|无线链路|已关联/已连接
+Wi-Fi|wifi/segmented-download|分段测速 (dns/connect/tls/bulk)|各阶段齐全
+Wi-Fi|wifi/boot-dmesg-has-iwlwifi|开机 dmesg 含 iwlwifi|有
+视频|media/arkwebcore-hap|ArkWebCore HAP|存在
+视频|media/engine-so-present|引擎 libarkweb_engine.so|存在
+视频|media/engine-version|引擎版本|可识别 (Chrome/x.y)
+视频|media/vaapi-present|libva (硬解栈)|存在
+视频|media/hevc-decoder|HEVC 解码器|存在或明确缺失
+视频|media/arkweb-decode-errors|ArkWeb 解码错误|0 条
+视频|media/aira-hevc-guard|Aira HEVC 屏蔽保护|已安装
+视频|media/browser-hevc-guard|自带浏览器 HEVC 屏蔽保护|已安装
+视频|media/web-render-running|web_render 进程|存在
+性能|perf/gl-renderer|GL_RENDERER|非空且非软渲染
+性能|perf/gl-backend|Mesa 后端|硬件 (iris)
+性能|perf/hitchs|掉帧 (>66ms)|0
+性能|perf/cpu-governor|CPU governor|performance
+性能|perf/render-service-cpu|render_service CPU%|有数值
+性能|perf/drm-connected|DRM 显示状态|connected
+性能|perf/rs-log-noise|RS 每帧 ERROR 日志|0
+硬解|hwdec/probe-log-present|硬解探针日志|存在
+硬解|hwdec/result|探针结论 RESULT|OK
+硬解|hwdec/decoded-frames|解码帧数 decoded_frames|>0
+硬解|hwdec/cpu-ratio|cpu_ratio|有数值 (越低越好)
+硬解|hwdec/implementations|oneVPL 实现数|>=1
+硬解|hwdec/probe-binary|探针二进制 /system/bin/hwdec_probe|存在
+硬解|hwdec/init-service|init 服务 hwdec_probe|已启动
+硬解|hwdec/va-stack|libva/libmfx/iHD 库|齐全
+硬解|hwdec/failure-reason|失败原因 reason|FAIL 时给出
+开机日志|bootlog/early-dmesg-captured|早期完整 dmesg|已抓取
+开机日志|bootlog/sof-hda-in-boot-dmesg|开机 SOF/HDA probe|有
+开机日志|bootlog/bluetooth-in-boot-dmesg|开机 Bluetooth probe|有
+开机日志|bootlog/iwlwifi-in-boot-dmesg|开机 iwlwifi probe|有
+开机日志|bootlog/gpu-in-boot-dmesg|开机 GPU (xe/drm) probe|有
+开机日志|bootlog/capture-window|抓取窗口|从开机起
+修复清单|fixes/manifest-present|修复清单 manifest|存在
+修复清单|fixes/all-match|镜像内修复 sha 自检|全部匹配'
+
+# truncate a long detail so the table stays readable
+# NOTE: no 'tr' on the device - the details never contain a newline anyway
+vtrunc() {
+    printf '%s' "$1" | cut -c1-100
+}
+
+# vwidth <string> -> the number of terminal columns it occupies.
+# LC_ALL is C here, so wc -c counts bytes.  A CJK character is 3 bytes and 2
+# columns, everything else is 1 byte and 1 column:
+#     columns = bytes - (bytes - ascii_bytes) / 3
+vwidth() {
+    _vw_b=$(printf '%s' "$1" | wc -c 2>/dev/null)
+    case "$_vw_b" in ''|*[!0-9]*) _vw_b=0 ;; esac
+    _vw_a=$(printf '%s' "$1" | sed 's/[^ -~]//g' 2>/dev/null | wc -c 2>/dev/null)
+    case "$_vw_a" in ''|*[!0-9]*) _vw_a=0 ;; esac
+    _vw_c=$(( (_vw_b - _vw_a) / 3 ))
+    [ "$_vw_c" -lt 0 ] && _vw_c=0
+    _vw_n=$(( _vw_b - _vw_c ))
+    [ "$_vw_n" -lt 0 ] && _vw_n=0
+    printf '%s' "$_vw_n"
+}
+
+# vpad <string> <width> -> the string padded to <width> terminal columns
+vpad() {
+    _vp_s=$1; _vp_w=$2
+    _vp_n=$(vwidth "$_vp_s")
+    _vp_k=$(( _vp_w - _vp_n ))
+    [ "$_vp_k" -lt 0 ] && _vp_k=0
+    _vp_p=""
+    while [ "$_vp_k" -gt 0 ]; do
+        _vp_p="$_vp_p "
+        _vp_k=$(( _vp_k - 1 ))
+    done
+    printf '%s%s' "$_vp_s" "$_vp_p"
+}
+
+# build_verdict_table -> $W/VERDICT.txt
+build_verdict_table() {
+    _vt="$W/VERDICT.txt"
+    _keys="$W/.vkeys"
+    : > "$_keys" 2>/dev/null
+
+    {
+        echo "================================================================"
+        echo " OHOS-DIAG VERDICT  --  pc_ptl (Intel PTL)"
+        echo "================================================================"
+        echo " 时间      : $(date 2>/dev/null)"
+        echo " 主机      : $(uname -a 2>/dev/null)"
+        echo " 运行时长  : $(cut -d. -f1 /proc/uptime 2>/dev/null)s"
+        echo " 执行 section: $SECTIONS"
+        if [ -r /system/etc/ohos-image-id ]; then
+            echo " 镜像 ID   :"
+            grep -v '^#' /system/etc/ohos-image-id 2>/dev/null | sed 's/^/              /'
+        fi
+        echo
+        echo "列含义: PASS = 达到期望; FAIL = 未达到; WARN = 有问题但不致命;"
+        echo "        SKIP = 该项无法判定(文件缺失/命令不存在/该 section 未运行)。"
+        echo
+        printf '%s | %s | %s | %s\n' "项目" "期望" "实测" "状态"
+        printf '%s\n' '---------------------------------------------+----------------------------------+--------------------------------------------------+-------'
+    } > "$_vt" 2>/dev/null
+
+    _last_cat=""
+    printf '%s\n' "$VSPEC" | while IFS='|' read -r _cat _key _what _exp; do
+        case "$_key" in ''|'#'*) continue ;; esac
+        printf '%s\n' "$_key" >> "$_keys" 2>/dev/null
+        vlookup "$_key"
+        if [ -n "$VLOOK_ST" ]; then
+            _st=$VLOOK_ST
+            _dt=$(vtrunc "$VLOOK_DT")
+        else
+            _st="SKIP"
+            _dt="未采集 (section 未运行或数据缺失)"
+        fi
+        if [ "$_cat" != "$_last_cat" ]; then
+            if [ -n "$_last_cat" ]; then
+                printf '%s\n' '---------------------------------------------+----------------------------------+--------------------------------------------------+-------'
+            fi
+            printf '%s | %s | %s | %s\n' "[$_cat]" "" "" ""
+            _last_cat=$_cat
+        fi
+        printf '%s | %s | %s | %s\n' "$(vpad "$_what" 43)" "$(vpad "$_exp" 32)" "$(vpad "$_dt" 50)" "$_st"
+    done >> "$_vt" 2>/dev/null
+
+    # anything that was checked but is not part of the table -> "其它"
+    _extra="$W/.vextra"
+    : > "$_extra" 2>/dev/null
+    if [ -r "$VERDICT_TSV" ]; then
+        while IFS='|' read -r _st _nm _dt; do
+            if ! grep -qxF "$_nm" "$_keys" 2>/dev/null; then
+                printf '%s|%s|%s\n' "$_st" "$_nm" "$_dt" >> "$_extra" 2>/dev/null
+            fi
+        done < "$VERDICT_TSV"
+    fi
+    if [ -s "$_extra" ]; then
+        {
+            printf '%s\n' '---------------------------------------------+----------------------------------+--------------------------------------------------+-------'
+            printf '%s | %s | %s | %s\n' "[其它]" "" "" ""
+            while IFS='|' read -r _st _nm _dt; do
+                printf '%s | %s | %s | %s\n' "$(vpad "$_nm" 43)" "-" "$(vpad "$(vtrunc "$_dt")" 50)" "$_st"
+            done < "$_extra"
+        } >> "$_vt" 2>/dev/null
+    fi
+    rm -f "$_extra" "$_keys" 2>/dev/null
+
+    {
+        printf '%s\n' '---------------------------------------------+----------------------------------+--------------------------------------------------+-------'
+        echo
+        echo "汇总: PASS=$V_PASS  FAIL=$V_FAIL  WARN=$V_WARN  SKIP=$V_SKIP"
+        echo
+        echo "各 section 原始文件:"
+        for f in "$W"/*.txt; do
+            [ -f "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in VERDICT.txt) continue ;; esac
+            printf '  %-28s %10s bytes\n' "$b" "$(wc -c < "$f" 2>/dev/null)"
+        done
+    } >> "$_vt" 2>/dev/null
+}
+
+# =============================================================================
+# main
+# =============================================================================
+{
+    echo "ohos-diag start"
+    echo "  sections : $SECTIONS"
+    echo "  outdir   : $OUTDIR"
+    echo "  workdir  : $W"
+    echo "  mode     : ${1:-all}"
+    echo "  --- IMAGE ID (authoritative; /system/etc/ohos_build_id used to lie) ---"
+    if [ -r /system/etc/ohos-image-id ]; then
+        grep -v '^#' /system/etc/ohos-image-id | sed 's/^/  /'
+    elif [ -r /vendor/etc/ohos-image-id ]; then
+        grep -v '^#' /vendor/etc/ohos-image-id | sed 's/^/  /'
+    else
+        echo "  (no ohos-image-id -- this image predates the stamp)"
+    fi
+    echo "  --- legacy build_id file (NOT authoritative) ---"
+    grep -v '^#' /system/etc/ohos_build_id 2>/dev/null | sed 's/^/  /'
+    echo "  --- partition free space (p2 is nearly full on this product) ---"
+    df -h / /vendor /data /sys_prod 2>/dev/null | sed 's/^/  /'
+    echo "  --- legacy build id (may be stale) ---"
+    sed 's/^/  /' /system/etc/ohos_build_id 2>/dev/null
+    echo "  --- collector mount namespace ---"
+    echo "  self: vendor=$(grep -c ' /vendor ' /proc/self/mountinfo 2>/dev/null) data=$(grep -c ' /data ' /proc/self/mountinfo 2>/dev/null)"
+    echo "  pid1: vendor=$(grep -c ' /vendor ' /proc/1/mountinfo 2>/dev/null) data=$(grep -c ' /data ' /proc/1/mountinfo 2>/dev/null)"
+    echo "  NOTE: self=0 with pid1>0 means this collector cannot see /vendor or /data;"
+    echo "        aplay/amixer/bm/RDB/bt_vendor.log will all look broken because of it."
+} | tee "$W/_header.txt"
+
+want bootlog    && sec_bootlog
+want fixes      && sec_fixes
+want desktop    && sec_desktop
+want bluetooth  && sec_bluetooth
+want audio      && sec_audio
+want audiotest  && sec_audiotest
+want wifi       && sec_wifi
+want media      && sec_media
+want ime        && sec_ime
+want perf       && sec_perf
+want system     && sec_system
+want hwdec      && sec_hwdec
+
+# The table is the deliverable: one row per checked item.
+build_verdict_table
+
+# The verdict is only complete after the sections have run, so it is appended
+# to the header now and printed to the console as well.
+{
+    echo
+    echo "  ===== VERDICT TABLE (the summary - see VERDICT.txt in the bundle) ====="
+    cat "$W/VERDICT.txt" 2>/dev/null
+    echo
+    echo "  ===== VERDICT (raw check list) ====="
+    cat "$VERDICT" 2>/dev/null
+    echo "  ------------------------------------------------------------"
+    echo "  PASS=$V_PASS  FAIL=$V_FAIL  WARN=$V_WARN  SKIP=$V_SKIP"
+} >> "$W/_header.txt" 2>/dev/null
+
+echo
+echo "===== VERDICT (VERDICT.txt) ====="
+cat "$W/VERDICT.txt" 2>/dev/null
+echo
+echo "PASS=$V_PASS  FAIL=$V_FAIL  WARN=$V_WARN  SKIP=$V_SKIP"
+
+# manifest of what was captured / what failed
+{
+    echo
+    echo "===== MANIFEST ====="
+    echo "sections requested: $SECTIONS"
+    echo
+    printf '%-24s %10s bytes  %6s lines\n' "VERDICT.txt" \
+        "$(wc -c < "$W/VERDICT.txt" 2>/dev/null)" "$(wc -l < "$W/VERDICT.txt" 2>/dev/null)"
+    for f in "$W"/*.txt; do
+        [ -f "$f" ] || continue
+        b=$(basename "$f")
+        [ "$b" = "VERDICT.txt" ] && continue
+        printf '%-24s %10s bytes  %6s lines\n' "$b" "$(wc -c < "$f")" "$(wc -l < "$f")"
+    done
+    echo
+    echo "===== VERDICT ====="
+    cat "$VERDICT" 2>/dev/null
+    echo "PASS=$V_PASS  FAIL=$V_FAIL  WARN=$V_WARN  SKIP=$V_SKIP"
+    echo
+    echo "===== COMMAND LOG (rc=nonzero means that item failed) ====="
+    cat "$W/_commands.log" 2>/dev/null
+} > "$W/_manifest.txt" 2>&1
+
+# sync before packing so a USB stick really has the bytes
+sync -f "$OUTDIR" 2>/dev/null || sync 2>/dev/null || true
+
+rm -f "$ARCHIVE" 2>/dev/null
+if have tar; then
+    # VERDICT.txt has to be the FIRST entry of the archive: the operator pulls
+    # exactly one file out of the bundle and reads that.
+    #   try: explicit member list (VERDICT.txt first, everything else after)
+    #   fall back to: VERDICT.txt then the whole directory
+    _MEMBERS=""
+    if [ -d "$W" ]; then
+        # the bundle file names never contain spaces or globs
+        for _m in $( cd "$W" && ls -A 2>/dev/null ); do
+            [ "$_m" = "VERDICT.txt" ] && continue
+            _MEMBERS="$_MEMBERS $_m"
+        done
+    fi
+    _OK=0
+    if [ -n "$_MEMBERS" ]; then
+        # VERDICT.txt first, then everything else - explicit member list, because
+        # the toybox tar on the device has no -T
+        if tar -czf "$ARCHIVE.$$" -C "$W" VERDICT.txt $_MEMBERS 2>/dev/null; then
+            _OK=1
+        fi
+    fi
+    if [ "$_OK" = 0 ]; then
+        rm -f "$ARCHIVE.$$" 2>/dev/null
+        if tar -czf "$ARCHIVE.$$" -C "$W" VERDICT.txt -C "$W" . 2>/dev/null; then
+            _OK=1
+        fi
+    fi
+    if [ "$_OK" = 1 ]; then
+        mv -f "$ARCHIVE.$$" "$ARCHIVE" 2>/dev/null || cp -f "$ARCHIVE.$$" "$ARCHIVE" 2>/dev/null
+    else
+        rm -f "$ARCHIVE.$$" 2>/dev/null
+        tar -cf - -C "$W" . 2>/dev/null | gzip > "$ARCHIVE" 2>/dev/null
+    fi
+fi
+sync -f "$OUTDIR" 2>/dev/null || sync 2>/dev/null || true
+
+# prune: keep the newest KEEP_N archives (ls -t, oldest first)
+if [ "$KEEP_N" -gt 0 ] 2>/dev/null; then
+    ls -t "$OUTDIR"/diag-*.tar.gz 2>/dev/null | tail -n "+$((KEEP_N + 1))" \
+        | while IFS= read -r old; do rm -f "$old" 2>/dev/null; done
+fi
+
+rm -rf "$W" 2>/dev/null
+
+if [ -f "$ARCHIVE" ]; then
+    SZ=$(wc -c < "$ARCHIVE" 2>/dev/null)
+    echo "ohos-diag: DONE, archive = $ARCHIVE ($SZ bytes)"
+    echo "ohos-diag: 已完成，文件在 $ARCHIVE"
+    echo "ohos-diag: 取包 (在 PC 上): hdc file recv $ARCHIVE ."
+    echo "ohos-diag: 总览: tar -xzOf $ARCHIVE VERDICT.txt"
+    printf '%s\n' "$ARCHIVE"
+    exit 0
+fi
+echo "ohos-diag: FAILED (cannot create $ARCHIVE); raw data left in $W"
+exit 1

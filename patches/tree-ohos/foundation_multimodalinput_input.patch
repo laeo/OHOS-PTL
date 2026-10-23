@@ -1,0 +1,689 @@
+diff --git a/frameworks/proxy/event_handler/src/client_msg_handler.cpp b/frameworks/proxy/event_handler/src/client_msg_handler.cpp
+index 6a04b5edf..c4789f60a 100644
+--- a/frameworks/proxy/event_handler/src/client_msg_handler.cpp
++++ b/frameworks/proxy/event_handler/src/client_msg_handler.cpp
+@@ -34,6 +34,7 @@
+ #include "multimodal_input_connect_manager.h"
+ #include "time_cost_chk.h"
+ #include "pre_monitor_manager.h"
++#include "util.h"
+ 
+ #undef MMI_LOG_TAG
+ #define MMI_LOG_TAG "ClientMsgHandler"
+@@ -42,6 +43,13 @@ namespace OHOS {
+ namespace MMI {
+ namespace {
+ constexpr int32_t PRINT_INTERVAL_COUNT { 50 };
++// The age of an event when it reaches the consumer. Above this value the consumer
++// is behind (busy main thread / blocked IPC) and the event was queued somewhere
++// in the input pipeline.
++constexpr int64_t SLOW_CONSUMER_US { 100000 };
++// A hover sample that is already this old is worthless. Dropping it keeps the
++// queue short so that the following down/up pair is not delayed behind it.
++constexpr int64_t STALE_HOVER_US { 200000 };
+ } // namespace
+ 
+ void ClientMsgHandler::Init()
+@@ -152,6 +160,11 @@ int32_t ClientMsgHandler::OnKeyEvent(const UDSClient& client, NetPacket& pkt)
+         return RET_ERR;
+     }
+     LogTracer lt(key->GetId(), key->GetEventType(), key->GetKeyAction());
++    const int64_t eventAge = GetSysClockTime() - key->GetActionTime();
++    if (eventAge > SLOW_CONSUMER_US) {
++        MMI_HILOGW("MMI_PERF slow consumer, key event age:%{public}lld us, action:%{public}d, id:%{public}d",
++            static_cast<long long>(eventAge), key->GetKeyAction(), key->GetId());
++    }
+     int32_t fd = 0;
+     pkt >> fd;
+ #ifdef OHOS_BUILD_ENABLE_SECURITY_COMPONENT
+@@ -245,6 +258,11 @@ int32_t ClientMsgHandler::OnPointerEvent(const UDSClient& client, NetPacket& pkt
+     }
+ #endif // OHOS_BUILD_ENABLE_SECURITY_COMPONENT
+     LogTracer lt(pointerEvent->GetId(), pointerEvent->GetEventType(), pointerEvent->GetPointerAction());
++    const int64_t eventAge = GetSysClockTime() - pointerEvent->GetActionTime();
++    if (eventAge > SLOW_CONSUMER_US) {
++        MMI_HILOGW("MMI_PERF slow consumer, pointer event age:%{public}lld us, action:%{public}d, id:%{public}d",
++            static_cast<long long>(eventAge), pointerEvent->GetPointerAction(), pointerEvent->GetId());
++    }
+     if (false && pointerEvent->GetPointerAction() != PointerEvent::POINTER_ACTION_AXIS_UPDATE &&
+         pointerEvent->GetPointerAction() != PointerEvent::POINTER_ACTION_ROTATE_UPDATE) {
+         std::string logInfo = std::string("ac: ") + pointerEvent->DumpPointerAction();
+@@ -257,6 +275,16 @@ int32_t ClientMsgHandler::OnPointerEvent(const UDSClient& client, NetPacket& pkt
+         MMI_HILOG_DISPATCHI("Operation canceled");
+     }
+     pointerEvent->SetProcessedCallback(dispatchCallback_);
++    if (eventAge > STALE_HOVER_US &&
++        pointerEvent->GetPointerAction() == PointerEvent::POINTER_ACTION_HOVER_MOVE) {
++        // Slow consumer protection: a stale hover sample carries no information,
++        // drop it so that the queue drains and the click that follows is not
++        // delayed behind it.
++        MMI_HILOGW("MMI_PERF drop stale hover event, age:%{public}lld us, id:%{public}d",
++            static_cast<long long>(eventAge), pointerEvent->GetId());
++        pointerEvent->MarkProcessed();
++        return RET_OK;
++    }
+     BytraceAdapter::StartBytrace(pointerEvent, BytraceAdapter::TRACE_START, BytraceAdapter::POINT_DISPATCH_EVENT);
+     processedCount_++;
+     if (processedCount_ == PRINT_INTERVAL_COUNT) {
+diff --git a/frameworks/proxy/module_loader/include/mmi_client.h b/frameworks/proxy/module_loader/include/mmi_client.h
+index da4f1ec4e..d904467fb 100644
+--- a/frameworks/proxy/module_loader/include/mmi_client.h
++++ b/frameworks/proxy/module_loader/include/mmi_client.h
+@@ -16,6 +16,13 @@
+ #ifndef MMI_CLIENT_H
+ #define MMI_CLIENT_H
+ 
++#include <atomic>
++#include <condition_variable>
++#include <deque>
++#include <mutex>
++#include <pthread.h>
++#include <vector>
++
+ #include "if_mmi_client.h"
+ 
+ #include "client_msg_handler.h"
+@@ -53,6 +60,11 @@ private:
+     bool AddFdListener(int32_t fd, bool selfCreate = false);
+     bool DelFdListener(int32_t fd);
+     void OnPacket(NetPacket& pkt);
++    bool StartDispatchThread();
++    void StopDispatchThread();
++    void DispatchLoop();
++    void ClearPendingPackets();
++    static void *DispatchThreadEntry(void *arg);
+     const std::string& GetErrorStr(ErrCode code) const;
+     void OnConnected() override;
+     void OnDisconnected() override;
+@@ -66,6 +78,22 @@ private:
+     EventHandlerPtr eventHandler_ { nullptr };
+     bool isEventHandlerChanged_ { false };
+     bool isListening_ { false };
++
++    // Slow consumer protection.
++    // The socket is drained by the file descriptor listener thread, but the event
++    // callbacks (which may block on a synchronous IPC to the application) are
++    // executed by a dedicated dispatch thread. Without this split a busy
++    // consumer stops reading its socket, the server side socket buffer fills up
++    // and input events are dropped - which shows up as "the text field does not
++    // get the focus".
++    pthread_t dispatchThread_ {};
++    bool dispatchThreadStarted_ { false };
++    std::mutex pendingMtx_;
++    std::condition_variable pendingCv_;
++    std::deque<std::vector<char>> pendingPackets_;
++    size_t pendingBytes_ { 0 };
++    bool dispatchExit_ { false };
++    std::atomic<int64_t> slowConsumerCount_ { 0 };
+ };
+ } // namespace MMI
+ } // namespace OHOS
+diff --git a/frameworks/proxy/module_loader/src/mmi_client.cpp b/frameworks/proxy/module_loader/src/mmi_client.cpp
+index 776f5effd..5b58de248 100644
+--- a/frameworks/proxy/module_loader/src/mmi_client.cpp
++++ b/frameworks/proxy/module_loader/src/mmi_client.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include "mmi_client.h"
+ 
++#include <pthread.h>
++
+ #include "anr_handler.h"
+ #include "mmi_fd_listener.h"
+ #include "multimodal_input_connect_manager.h"
+@@ -28,9 +30,13 @@ namespace OHOS {
+ namespace MMI {
+ namespace {
+ const std::string THREAD_NAME { "OS_mmi_EventHdr" };
++const std::string DISPATCH_THREAD_NAME { "OS_mmi_Dispatch" };
+ static const bool USE_FILE_DESCRIPTION = system::GetBoolParameter("const.sys.param_file_description_monitor", false);
+ static const bool USE_ISOLATE_DISPATCH_THREAD =
+     system::GetBoolParameter("const.multimodalinput.use_isolate_dispatch_thread", false);
++// The consumer is behind when more than this amount of input data is waiting
++// to be dispatched.
++constexpr size_t SLOW_CONSUMER_BYTES { 512 * 1024 };
+ } // namespace
+ 
+ using namespace AppExecFwk;
+@@ -87,6 +93,11 @@ bool MMIClient::Start()
+ {
+     CALL_DEBUG_ENTER;
+     msgHandler_.Init();
++    if (!StartDispatchThread()) {
++        MMI_HILOGE("Start dispatch thread failed");
++        Stop();
++        return false;
++    }
+     auto callback = [this] (const UDSClient& client, NetPacket& pkt) { return msgHandler_.OnMsgHandler(client, pkt); };
+     if (!StartClient(callback)) {
+         MMI_HILOGE("Client startup failed");
+@@ -196,10 +207,94 @@ void MMIClient::OnRecvMsg(const char *buf, size_t size)
+         MMI_HILOGE("Invalid input param size. size:%{public}zu", size);
+         return;
+     }
+-    if (!circBuf_.Write(buf, size)) {
+-        MMI_HILOGW("Write data failed. size:%{public}zu", size);
++
++    // Only enqueue here and return immediately: the file descriptor listener
++    // thread must go back to reading the socket as fast as possible, otherwise
++    // the server side buffer of a slow consumer fills up and input events are
++    // dropped. The (possibly blocking) event callbacks run on the dispatch
++    // thread.
++    {
++        std::lock_guard<std::mutex> lock(pendingMtx_);
++        pendingPackets_.emplace_back(buf, buf + size);
++        pendingBytes_ += size;
++        if (pendingBytes_ > SLOW_CONSUMER_BYTES) {
++            slowConsumerCount_.fetch_add(1);
++            MMI_HILOGW("MMI_PERF slow consumer, %{public}zu bytes of input events are waiting to be dispatched",
++                pendingBytes_);
++        }
++    }
++    pendingCv_.notify_one();
++}
++
++bool MMIClient::StartDispatchThread()
++{
++    CALL_DEBUG_ENTER;
++    if (dispatchThreadStarted_) {
++        return true;
++    }
++    dispatchExit_ = false;
++    int32_t ret = pthread_create(&dispatchThread_, nullptr, &MMIClient::DispatchThreadEntry, this);
++    if (ret != 0) {
++        MMI_HILOGE("Create dispatch thread failed, ret:%{public}d", ret);
++        return false;
++    }
++    dispatchThreadStarted_ = true;
++    return true;
++}
++
++void MMIClient::StopDispatchThread()
++{
++    CALL_DEBUG_ENTER;
++    {
++        std::lock_guard<std::mutex> lock(pendingMtx_);
++        dispatchExit_ = true;
++    }
++    pendingCv_.notify_all();
++    if (dispatchThreadStarted_) {
++        pthread_join(dispatchThread_, nullptr);
++        dispatchThreadStarted_ = false;
++    }
++}
++
++void* MMIClient::DispatchThreadEntry(void *arg)
++{
++    auto client = static_cast<MMIClient *>(arg);
++    if (client != nullptr) {
++        client->DispatchLoop();
++    }
++    return nullptr;
++}
++
++void MMIClient::ClearPendingPackets()
++{
++    std::lock_guard<std::mutex> lock(pendingMtx_);
++    pendingPackets_.clear();
++    pendingBytes_ = 0;
++}
++
++void MMIClient::DispatchLoop()
++{
++    while (true) {
++        std::vector<char> chunk;
++        {
++            std::unique_lock<std::mutex> lock(pendingMtx_);
++            pendingCv_.wait(lock, [this] { return dispatchExit_ || !pendingPackets_.empty(); });
++            if (pendingPackets_.empty()) {
++                if (dispatchExit_) {
++                    break;
++                }
++                continue;
++            }
++            chunk = std::move(pendingPackets_.front());
++            pendingPackets_.pop_front();
++            pendingBytes_ -= chunk.size();
++        }
++        if (!circBuf_.Write(chunk.data(), chunk.size())) {
++            MMI_HILOGW("Write data failed. size:%{public}zu", chunk.size());
++            continue;
++        }
++        OnReadPackets(circBuf_, [this] (NetPacket& pkt) { return this->OnPacket(pkt); });
+     }
+-    OnReadPackets(circBuf_, [this] (NetPacket& pkt) { return this->OnPacket(pkt); });
+ }
+ 
+ int32_t MMIClient::Reconnect()
+@@ -248,6 +343,7 @@ void MMIClient::OnDisconnected()
+     isConnected_ = false;
+     isListening_ = false;
+     ANRHDL->ResetAnrArray();
++    ClearPendingPackets();
+     if (funDisconnected_) {
+         funDisconnected_(*this);
+     }
+@@ -308,14 +404,15 @@ void MMIClient::Stop()
+     UDSClient::Stop();
+     if (eventHandler_ != nullptr) {
+         auto runner = eventHandler_->GetEventRunner();
+-        CHKPV(runner);
+-        if (runner->GetRunnerThreadName() == THREAD_NAME) {
++        if (runner != nullptr && runner->GetRunnerThreadName() == THREAD_NAME) {
+             runner->Stop();
+             eventHandler_->RemoveAllEvents();
+             eventHandler_->RemoveAllFileDescriptorListeners();
+             MMI_HILOGI("Remove all file descriptor listeners success");
+         }
+     }
++    StopDispatchThread();
++    ClearPendingPackets();
+ }
+ 
+ const std::string& MMIClient::GetErrorStr(ErrCode code) const
+diff --git a/service/event_dispatch/include/event_dispatch_handler.h b/service/event_dispatch/include/event_dispatch_handler.h
+index 583f8beab..d8587e05c 100644
+--- a/service/event_dispatch/include/event_dispatch_handler.h
++++ b/service/event_dispatch/include/event_dispatch_handler.h
+@@ -109,6 +109,7 @@ private:
+     void FilterInvalidPointerItem(const std::shared_ptr<PointerEvent> pointEvent, int32_t fd);
+ #endif // OHOS_BUILD_ENABLE_POINTER || OHOS_BUILD_ENABLE_TOUCH
+     bool AcquireEnableMark(std::shared_ptr<PointerEvent> event);
++    void ReportDispatchLatency(int64_t actionTime, int64_t eventId, int32_t action, bool critical);
+ #ifndef OHOS_BUILD_ENABLE_WATCH
+     std::atomic<std::chrono::steady_clock::time_point> sendMoveTime_ = std::chrono::steady_clock::now();
+     std::atomic<std::chrono::steady_clock::time_point> sendAxisUpdateTime_ = std::chrono::steady_clock::now();
+diff --git a/service/event_dispatch/src/event_dispatch_handler.cpp b/service/event_dispatch/src/event_dispatch_handler.cpp
+index fb4707c51..836c056f2 100644
+--- a/service/event_dispatch/src/event_dispatch_handler.cpp
++++ b/service/event_dispatch/src/event_dispatch_handler.cpp
+@@ -51,9 +51,42 @@ constexpr int64_t ERROR_TIME {3000000};
+ constexpr int32_t INTERVAL_TIME { 3000 }; // log time interval is 3 seconds.
+ constexpr int32_t INTERVAL_DURATION { 10 };
+ constexpr int32_t THREE_FINGERS { 3 };
++// A pointer/key event whose age (event timestamp -> now) exceeds this value is
++// reported as a slow input pipeline. 50ms is well above the healthy budget
++// (kernel -> MMI -> client) but far below a visible "focus lag".
++constexpr int64_t SLOW_DISPATCH_US { 50000 };
+ #ifndef OHOS_BUILD_ENABLE_WATCH
+ static constexpr auto sendConsecutiveEventInterval = std::chrono::milliseconds(1000);
+ #endif // OHOS_BUILD_ENABLE_WATCH
++
++/**
++ * @brief Events that carry the meaning of a "click" must never be dropped.
++ *
++ * Motion/hover samples are coalescible: when a consumer is slow the newest
++ * sample supersedes the older ones. A down/up pair is not: dropping it means
++ * the user has to click again, which is exactly the "focus is very laggy"
++ * symptom we are chasing.
++ */
++inline bool IsCriticalPointerAction(int32_t action)
++{
++    switch (action) {
++        case PointerEvent::POINTER_ACTION_DOWN:
++        case PointerEvent::POINTER_ACTION_UP:
++        case PointerEvent::POINTER_ACTION_BUTTON_DOWN:
++        case PointerEvent::POINTER_ACTION_BUTTON_UP:
++        case PointerEvent::POINTER_ACTION_CANCEL:
++        case PointerEvent::POINTER_ACTION_AXIS_BEGIN:
++        case PointerEvent::POINTER_ACTION_AXIS_END:
++            return true;
++        default:
++            return false;
++    }
++}
++
++inline bool IsCriticalKeyAction(int32_t keyAction)
++{
++    return keyAction == KeyEvent::KEY_ACTION_DOWN || keyAction == KeyEvent::KEY_ACTION_UP;
++}
+ } // namespace
+ 
+ #ifdef OHOS_BUILD_ENABLE_KEYBOARD
+@@ -343,6 +376,19 @@ void EventDispatchHandler::NotifyPointerEventToRS(int32_t pointAction, const std
+ #endif // OHOS_BUILD_ENABLE_WATCH
+ }
+ 
++void EventDispatchHandler::ReportDispatchLatency(int64_t actionTime, int64_t eventId, int32_t action, bool critical)
++{
++    if (actionTime <= 0) {
++        return;
++    }
++    int64_t age = GetSysClockTime() - actionTime;
++    if (age < SLOW_DISPATCH_US) {
++        return;
++    }
++    MMI_HILOGW("MMI_PERF slow dispatch, event age:%{public}lld us, id:%{public}lld, action:%{public}d, critical:%{public}d",
++        static_cast<long long>(age), static_cast<long long>(eventId), action, critical);
++}
++
+ bool EventDispatchHandler::AcquireEnableMark(std::shared_ptr<PointerEvent> event)
+ {
+     auto currentEventTime = std::chrono::high_resolution_clock::now();
+@@ -584,10 +630,12 @@ void EventDispatchHandler::DispatchPointerEventInner(std::shared_ptr<PointerEven
+         MMI_HILOG_FREEZEI("SendMsg:%{public}d, pointerAc:%{public}d", sess->GetPid(), pointerAc);
+     }
+     WIN_MGR->PrintEnterEventInfo(pointerEvent);
+-    if (!udsServer->SendMsg(fd, pkt)) {
++    const bool critical = IsCriticalPointerAction(pointerAc);
++    if (!udsServer->SendMsg(fd, pkt, critical)) {
+         MMI_HILOGE("Sending structure of EventTouch failed! errCode:%{public}d", MSG_SEND_FAIL);
+         return;
+     }
++    ReportDispatchLatency(pointerEvent->GetActionTime(), pointerEvent->GetId(), pointerAc, critical);
+     if (sess->GetPid() != AppDebugListener::GetInstance()->GetAppDebugPid() && pointerEvent->IsMarkEnabled()) {
+         MMI_HILOGD("Session pid:%{public}d", sess->GetPid());
+         ANRMgr->AddTimer(ANR_DISPATCH, point->GetId(), currentTime, sess);
+@@ -660,10 +708,12 @@ int32_t EventDispatchHandler::DispatchKeyEvent(int32_t fd, UDSServer& udsServer,
+     }
+     MMI_HILOGD("InputTracking id:%{public}d, SendMsg to %{public}s:pid:%{public}d",
+         key->GetId(), session->GetProgramName().c_str(), session->GetPid());
+-    if (!udsServer.SendMsg(fd, pkt)) {
++    const bool critical = IsCriticalKeyAction(key->GetKeyAction());
++    if (!udsServer.SendMsg(fd, pkt, critical)) {
+         MMI_HILOGE("Sending structure of EventKeyboard failed! errCode:%{public}d", MSG_SEND_FAIL);
+         return MSG_SEND_FAIL;
+     }
++    ReportDispatchLatency(key->GetActionTime(), key->GetId(), key->GetKeyAction(), critical);
+     if (session->GetPid() != AppDebugListener::GetInstance()->GetAppDebugPid()) {
+         MMI_HILOGD("Session pid:%{public}d", session->GetPid());
+         ANRMgr->AddTimer(ANR_DISPATCH, key->GetId(), currentTime, session);
+diff --git a/service/module_loader/include/uds_server.h b/service/module_loader/include/uds_server.h
+index 987a76092..9e68ed7d8 100644
+--- a/service/module_loader/include/uds_server.h
++++ b/service/module_loader/include/uds_server.h
+@@ -46,7 +46,7 @@ public:
+     DISALLOW_COPY_AND_MOVE(UDSServer);
+     virtual ~UDSServer();
+     void UdsStop();
+-    bool SendMsg(int32_t fd, NetPacket& pkt);
++    bool SendMsg(int32_t fd, NetPacket& pkt, bool critical = false);
+     void Multicast(const std::vector<int32_t>& fdList, NetPacket& pkt);
+     void Dump(int32_t fd, const std::vector<std::string> &args);
+     int32_t GetClientFd(int32_t pid) const;
+diff --git a/service/module_loader/src/uds_server.cpp b/service/module_loader/src/uds_server.cpp
+index b1f054ade..a2f094279 100644
+--- a/service/module_loader/src/uds_server.cpp
++++ b/service/module_loader/src/uds_server.cpp
+@@ -72,7 +72,7 @@ int32_t UDSServer::GetClientPid(int32_t fd) const
+     return sp->GetPid();
+ }
+ 
+-bool UDSServer::SendMsg(int32_t fd, NetPacket& pkt)
++bool UDSServer::SendMsg(int32_t fd, NetPacket& pkt, bool critical)
+ {
+     if (fd < 0) {
+         MMI_HILOGE("The fd is less than 0");
+@@ -84,7 +84,7 @@ bool UDSServer::SendMsg(int32_t fd, NetPacket& pkt)
+                    fd, SESSION_NOT_FOUND);
+         return false;
+     }
+-    return ses->SendMsg(pkt);
++    return ses->SendMsg(pkt, critical);
+ }
+ 
+ void UDSServer::Multicast(const std::vector<int32_t>& fdList, NetPacket& pkt)
+diff --git a/service/window_manager/include/pointer_drawing_manager.h b/service/window_manager/include/pointer_drawing_manager.h
+index 1930cd778..4200302af 100644
+--- a/service/window_manager/include/pointer_drawing_manager.h
++++ b/service/window_manager/include/pointer_drawing_manager.h
+@@ -438,6 +438,7 @@ private:
+     std::mutex cursorBlurEnableMutex_;
+     bool isRsRemoteDied_ { false };
+     std::atomic<bool> isHardCursorSurfaceNodeInited_ { false };
++    std::atomic<bool> pointerWindowRecreateOnceScheduled_ { false };
+ };
+ } // namespace MMI
+ } // namespace OHOS
+diff --git a/service/window_manager/src/pointer_drawing_manager.cpp b/service/window_manager/src/pointer_drawing_manager.cpp
+index a0df74679..2aecf96c8 100644
+--- a/service/window_manager/src/pointer_drawing_manager.cpp
++++ b/service/window_manager/src/pointer_drawing_manager.cpp
+@@ -117,6 +117,12 @@ constexpr float CALCULATE_MOUSE_ICON_BAIS { 5.0f };
+ constexpr int32_t SYNC_FENCE_WAIT_TIME { 3000 };
+ constexpr int32_t REPEAT_COOLING_TIME { 1000 };
+ constexpr int32_t REPEAT_ONCE { 1 };
++// On x86_64_virt (QEMU/virtio, no HWC hardware cursor) the pointer window
++// surface node created during boot may never have its buffers consumed by
++// RenderService, leaving the cursor invisible. Recreating the node a few
++// times shortly after the first draw makes the cursor show up.
++constexpr int32_t POINTER_WINDOW_RECREATE_DELAYS[] { 2000, 6000, 15000 };
++constexpr int32_t POINTER_WINDOW_RECREATE_MAX_ATTEMPTS { 3 };
+ constexpr int32_t MOVE_RETRY_TIME { 50 };
+ constexpr int32_t MAX_MOVE_RETRY_COUNT { 5 };
+ constexpr int32_t ANGLE_90 { 90 };
+@@ -705,6 +711,15 @@ void PointerDrawingManager::DrawPointer(uint64_t rsId, int32_t physicalX, int32_
+         return;
+     }
+     UpdatePointerVisible();
++    if (!GetHardCursorEnabled() && !pointerWindowRecreateOnceScheduled_.exchange(true)) {
++        for (int32_t attempt = 0; attempt < POINTER_WINDOW_RECREATE_MAX_ATTEMPTS; ++attempt) {
++            int32_t delay = POINTER_WINDOW_RECREATE_DELAYS[attempt];
++            TimerMgr->AddTimer(delay, REPEAT_ONCE, [this, attempt]() {
++                MMI_HILOGI("Recreate pointer window attempt:%{public}d for buffer consumption", attempt);
++                SwitchPointerStyle();
++            }, "PointerDrawingManager-RecreatePointerWindow");
++        }
++    }
+     MMI_HILOGI("Leave, rsId:%{private}" PRIu64 ", physicalX:%{private}d, physicalY:%{private}d",
+         rsId, physicalX, physicalY);
+ }
+diff --git a/util/socket/include/uds_session.h b/util/socket/include/uds_session.h
+index 82be57b79..b534dc1ff 100644
+--- a/util/socket/include/uds_session.h
++++ b/util/socket/include/uds_session.h
+@@ -16,6 +16,7 @@
+ #ifndef UDS_SESSION_H
+ #define UDS_SESSION_H
+ 
++#include <atomic>
+ #include <list>
+ 
+ #include "net_packet.h"
+@@ -31,8 +32,21 @@ public:
+     DISALLOW_COPY_AND_MOVE(UDSSession);
+     virtual ~UDSSession() = default;
+ 
+-    bool SendMsg(const char *buf, size_t size);
+-    bool SendMsg(NetPacket &pkt);
++    /**
++     * @brief Send a packet to the peer.
++     *
++     * @param buf     raw packet bytes
++     * @param size    packet size
++     * @param critical true for events that must not be lost (pointer/key down-up),
++     *                 false for coalescible events (motion/hover).
++     *
++     * A critical event is retried for a bounded time when the peer receive buffer
++     * is full, so that a momentarily slow consumer never loses a click.
++     * A non critical (coalescible) event is dropped immediately instead, so that the
++     * input pipeline is never blocked by a slow consumer.
++     */
++    bool SendMsg(const char *buf, size_t size, bool critical = false);
++    bool SendMsg(NetPacket &pkt, bool critical = false);
+     void Close();
+     struct EventTime {
+         int32_t id { 0 };
+@@ -115,6 +129,22 @@ public:
+     void ReportSocketBufferFull();
+     std::vector<EventTime> GetEventsByType(int32_t type) const;
+ 
++    /**
++     * @brief Number of events dropped because the peer receive buffer was full.
++     */
++    int64_t GetDroppedEventCount() const
++    {
++        return droppedEventCount_.load();
++    }
++
++    /**
++     * @brief Number of times a critical event had to wait for a slow consumer.
++     */
++    int64_t GetSlowConsumerCount() const
++    {
++        return slowConsumerCount_.load();
++    }
++
+ protected:
+     std::map<int32_t, std::vector<EventTime>> events_;
+     std::map<int32_t, bool> isAnrProcess_;
+@@ -130,6 +160,8 @@ protected:
+     int32_t lastReportedPid_ = 0;
+     uint32_t tokenId_ = 0;
+     bool isRealProcessName_ = true;
++    std::atomic<int64_t> droppedEventCount_ { 0 };
++    std::atomic<int64_t> slowConsumerCount_ { 0 };
+ };
+ } // namespace MMI
+ } // namespace OHOS
+diff --git a/util/socket/src/uds_session.cpp b/util/socket/src/uds_session.cpp
+index 851c19d92..e93b02822 100644
+--- a/util/socket/src/uds_session.cpp
++++ b/util/socket/src/uds_session.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include "uds_session.h"
+ 
++#include <poll.h>
++
+ #include "hisysevent.h"
+ #include "uds_socket.h"
+ 
+@@ -26,6 +28,10 @@ namespace MMI {
+ namespace {
+ const std::string FOUNDATION = "foundation";
+ constexpr int32_t MINUTEINMILLIS { 60000 };
++// A critical event (pointer/key down-up) must not be lost because the consumer is
++// momentarily busy. Wait at most this long for the peer receive buffer to drain.
++constexpr int32_t CRITICAL_SEND_WAIT_MS { 150 };
++constexpr int64_t MS_TO_US { 1000 };
+ } // namespace
+ 
+ UDSSession::UDSSession(const std::string &programName, const int32_t moduleType, const int32_t fd,
+@@ -43,7 +49,7 @@ UDSSession::UDSSession(const std::string &programName, const int32_t moduleType,
+     isAnrProcess_[ANR_MONITOR] = false;
+ }
+ 
+-bool UDSSession::SendMsg(const char *buf, size_t size)
++bool UDSSession::SendMsg(const char *buf, size_t size, bool critical)
+ {
+     CHKPF(buf);
+     if ((size == 0) || (size > MAX_PACKET_BUF_SIZE)) {
+@@ -55,18 +61,84 @@ bool UDSSession::SendMsg(const char *buf, size_t size)
+         return false;
+     }
+ 
++    // Flow control: the input dispatch thread must never block on a slow
++    // client. Probe writability first so that we never start a packet we
++    // cannot finish (an abandoned partial write on a stream socket would
++    // desync the length-prefixed framing).
++    //
++    // A *critical* event (pointer/key down-up) may not be thrown away: when the
++    // peer buffer is full we wait a bounded time for it to drain. A *coalescible*
++    // event (motion/hover) is dropped immediately, because a stale motion sample
++    // has no value and dropping it keeps the pipeline flowing.
++    struct pollfd pollFd = { fd_, POLLOUT, 0 };
++    int64_t deadline = 0;
++    if (critical) {
++        deadline = GetSysClockTime() + static_cast<int64_t>(CRITICAL_SEND_WAIT_MS) * MS_TO_US;
++    }
++    bool writable = false;
++    while (true) {
++        int32_t timeoutMs = 0;
++        if (critical) {
++            int64_t now = GetSysClockTime();
++            if (now >= deadline) {
++                break;
++            }
++            timeoutMs = static_cast<int32_t>((deadline - now) / MS_TO_US);
++        }
++        pollFd.revents = 0;
++        int32_t pollRet = poll(&pollFd, 1, timeoutMs);
++        if (pollRet < 0) {
++            if (errno == EINTR) {
++                if (!critical) {
++                    return false;
++                }
++                continue;
++            }
++            MMI_HILOGE("Poll return failed,error:%{public}d fd:%{public}d, pid:%{public}d", errno, fd_, pid_);
++            return false;
++        }
++        if (pollRet == 0) {
++            // The peer receive buffer is still full.
++            if (!critical) {
++                break;
++            }
++            slowConsumerCount_.fetch_add(1);
++            MMI_HILOGW("MMI_PERF slow consumer, waiting for critical event, fd:%{public}d, pid:%{public}d",
++                fd_, pid_);
++            continue;
++        }
++        if ((pollFd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
++            MMI_HILOGE("Socket hung up, fd:%{public}d, pid:%{public}d, revents:%{public}d", fd_, pid_, pollFd.revents);
++            invalidSocket_ = true;
++            return false;
++        }
++        writable = true;
++        break;
++    }
++    if (!writable) {
++        droppedEventCount_.fetch_add(1);
++        MMI_HILOGW("MMI_PERF drop event, consumer buffer full, critical:%{public}d, fd:%{public}d, pid:%{public}d",
++            critical, fd_, pid_);
++        ReportSocketBufferFull();
++        return false;
++    }
++
+     int32_t idx = 0;
+     int32_t retryCount = 0;
+     const int32_t bufSize = static_cast<int32_t>(size);
+     int32_t remSize = bufSize;
+-    int32_t socketErrorNo = 0;
+     while (remSize > 0 && retryCount < SEND_RETRY_LIMIT) {
+         retryCount += 1;
+         auto count = send(fd_, &buf[idx], remSize, MSG_DONTWAIT | MSG_NOSIGNAL);
+         if (count < 0) {
+             if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK) {
+-                socketErrorNo = errno;
+-                continue;
++                // The buffer filled up mid-packet; give up immediately rather
++                // than busy-retrying SEND_RETRY_LIMIT times.
++                droppedEventCount_.fetch_add(1);
++                MMI_HILOGW("MMI_PERF drop event, buffer filled mid packet, critical:%{public}d, fd:%{public}d, "
++                    "pid:%{public}d", critical, fd_, pid_);
++                ReportSocketBufferFull();
++                return false;
+             }
+             if (errno == ENOTSOCK) {
+                 MMI_HILOGE("Got ENOTSOCK error, turn the socket to invalid");
+@@ -82,10 +154,8 @@ bool UDSSession::SendMsg(const char *buf, size_t size)
+             usleep(SEND_RETRY_SLEEP_TIME);
+         }
+     }
+-    if (socketErrorNo == EWOULDBLOCK) {
+-        ReportSocketBufferFull();
+-    }
+     if (retryCount >= SEND_RETRY_LIMIT || remSize != 0) {
++        droppedEventCount_.fetch_add(1);
+         MMI_HILOGE("Send too many times:%{public}d/%{public}d,size:%{public}d/%{public}d errno:%{public}d, "
+                    "fd:%{public}d, pid:%{public}d", retryCount, SEND_RETRY_LIMIT, idx, bufSize, errno, fd_, pid_);
+         return false;
+@@ -118,7 +188,7 @@ void UDSSession::UpdateDescript()
+     descript_ = oss.str().c_str();
+ }
+ 
+-bool UDSSession::SendMsg(NetPacket &pkt)
++bool UDSSession::SendMsg(NetPacket &pkt, bool critical)
+ {
+     if (pkt.ChkRWError()) {
+         MMI_HILOGE("Read and write status is error");
+@@ -126,7 +196,7 @@ bool UDSSession::SendMsg(NetPacket &pkt)
+     }
+     StreamBuffer buf;
+     pkt.MakeData(buf);
+-    return SendMsg(buf.Data(), buf.Size());
++    return SendMsg(buf.Data(), buf.Size(), critical);
+ }
+ 
+ void UDSSession::ReportSocketBufferFull()

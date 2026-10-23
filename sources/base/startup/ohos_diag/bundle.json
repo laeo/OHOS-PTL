@@ -1,0 +1,36 @@
+{
+  "name": "@ohos/ohos_diag",
+  "description": "One-command diagnostic bundle collector and boot/shutdown hooks for the OpenHarmony PC image",
+  "homePage": "https://gitee.com/openharmony",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "repository": "https://gitee.com/openharmony/startup",
+  "supplier": "Organization: OpenHarmony",
+  "publishAs": "code-segment",
+  "segment": {
+    "destPath": "base/startup/ohos_diag"
+  },
+  "dirs": {},
+  "scripts": {},
+  "component": {
+    "name": "pc_ohos_diag",
+    "subsystem": "startup",
+    "features": [],
+    "adapted_system_type": [
+      "standard"
+    ],
+    "rom": "20KB",
+    "ram": "",
+    "deps": {
+      "components": [],
+      "third_party": []
+    },
+    "build": {
+      "sub_component": [
+        "//base/startup/ohos_diag:pc_ohos_diag"
+      ],
+      "inner_kits": [],
+      "test": []
+    }
+  }
+}

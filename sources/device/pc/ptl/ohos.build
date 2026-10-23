@@ -1,0 +1,10 @@
+{
+  "subsystem": "device_ptl",
+  "parts": {
+    "device_ptl": {
+      "module_list": [
+        "//device/pc/ptl:pc_ptl"
+      ]
+    }
+  }
+}

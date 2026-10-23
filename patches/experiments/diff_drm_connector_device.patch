@@ -1,0 +1,573 @@
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_connector.cpp b/common/virt_full/hardware/display/src/display_device/drm_connector.cpp
+index f233008..b352b0d 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_connector.cpp
++++ b/common/virt_full/hardware/display/src/display_device/drm_connector.cpp
+@@ -16,15 +16,102 @@
+ #include "drm_connector.h"
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
++#include <cerrno>
+ #include <cinttypes>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <dirent.h>
++#include <fcntl.h>
++#include <string>
++#include <unistd.h>
++#include <vector>
+ #include <securec.h>
+ #include "display_log.h"
+ #include "drm_device.h"
+ #include "drm_vsync_worker.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+ namespace DISPLAY {
++namespace {
++constexpr const char *BACKLIGHT_CLASS_DIR = "/sys/class/backlight";
++// Native Intel backlight node; preferred over the generic acpi_video one.
++constexpr const char *PREFERRED_BACKLIGHT = "intel_backlight";
++// OHOS passes brightness as a 0..255 level (BRIGHTNESS_MAX in the
++// display_power_manager brightness service); the sysfs node has its own range.
++constexpr uint32_t OHOS_BRIGHTNESS_MAX = 255;
++
++uint32_t ReadUintFromFile(const std::string &path)
++{
++    FILE *fp = fopen(path.c_str(), "r");
++    if (fp == nullptr) {
++        return 0;
++    }
++    char buf[32] = {0};
++    char *ret = fgets(buf, sizeof(buf), fp);
++    fclose(fp);
++    if (ret == nullptr) {
++        return 0;
++    }
++    return static_cast<uint32_t>(strtoul(buf, nullptr, 10));
++}
++
++// Pick a backlight node and read its max_brightness.  Returns DISPLAY_SUCCESS
++// and fills |brightnessPath|/|maxLevel| on success.
++int32_t FindBacklightNode(std::string &brightnessPath, uint32_t &maxLevel)
++{
++    DIR *dir = opendir(BACKLIGHT_CLASS_DIR);
++    if (dir == nullptr) {
++        return DISPLAY_FAILURE;
++    }
++    std::vector<std::string> names;
++    struct dirent *entry = nullptr;
++    while ((entry = readdir(dir)) != nullptr) {
++        if ((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0)) {
++            continue;
++        }
++        names.emplace_back(entry->d_name);
++    }
++    closedir(dir);
++
++    std::string chosen;
++    for (const auto &name : names) {
++        if (name == PREFERRED_BACKLIGHT) {
++            chosen = name;
++            break;
++        }
++    }
++    if (chosen.empty()) {
++        // Prefer a native node over the generic ACPI one.
++        for (const auto &name : names) {
++            if (name.rfind("acpi_video", 0) != 0) {
++                chosen = name;
++                break;
++            }
++        }
++    }
++    if (chosen.empty() && !names.empty()) {
++        chosen = names.front();
++    }
++    if (chosen.empty()) {
++        return DISPLAY_FAILURE;
++    }
++
++    std::string base = std::string(BACKLIGHT_CLASS_DIR) + "/" + chosen;
++    uint32_t max = ReadUintFromFile(base + "/max_brightness");
++    if (max == 0) {
++        DISPLAY_LOGW("backlight %{public}s has no usable max_brightness", chosen.c_str());
++        return DISPLAY_FAILURE;
++    }
++    maxLevel = max;
++    brightnessPath = base + "/brightness";
++    DISPLAY_LOGI("found backlight node %{public}s (max %{public}u)", chosen.c_str(), max);
++    return DISPLAY_SUCCESS;
++}
++} // namespace
++
+ void DrmMode::ConvertToHdiMode(DisplayModeInfo &hdiMode)
+ {
+     hdiMode.height = mModeInfo.vdisplay;
+@@ -82,13 +169,21 @@ int32_t DrmConnector::Init(DrmDevice &drmDevice)
+     DISPLAY_CHK_RETURN((mDrmFdPtr->GetFd() == -1), DISPLAY_FAILURE, DISPLAY_LOGE("the drm fd is -1"));
+     // find dpms prop
+     ret = drmDevice.GetConnectorProperty(*this, PROP_DPMS, prop);
+-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get mode prop id"));
++    if (ret != DISPLAY_SUCCESS) {
++        DISPLAY_LOGE("can not get mode prop id");
++        comp_kmsg::Print("DRM", "Connector Init FAIL: connector id=%u missing DPMS prop ret=%d", mId, ret);
++        return DISPLAY_FAILURE;
++    }
+     mPropDpmsId = prop.propId;
+     mDpmsState = prop.value;
+     DISPLAY_LOGD("dpms state : %{public}" PRIu64 "", mDpmsState);
+     // find the crtcid
+     ret = drmDevice.GetConnectorProperty(*this, PROP_CRTCID, prop);
+-    DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("cat not get out fence prop id"));
++    if (ret != DISPLAY_SUCCESS) {
++        DISPLAY_LOGE("cat not get out fence prop id");
++        comp_kmsg::Print("DRM", "Connector Init FAIL: connector id=%u missing CRTC_ID prop ret=%d", mId, ret);
++        return DISPLAY_FAILURE;
++    }
+     mPropCrtcId = prop.propId;
+     DISPLAY_LOGD("encoder_id %{public}d", mEncoderId);
+     DISPLAY_LOGD("mPropCrtcId %{public}d", mPropCrtcId);
+@@ -96,63 +191,83 @@ int32_t DrmConnector::Init(DrmDevice &drmDevice)
+     return DISPLAY_SUCCESS;
+ }
+ 
++int32_t DrmConnector::EnsureBacklightResolved()
++{
++    if (mBacklightResolved) {
++        return (mBacklightFd >= 0) ? DISPLAY_SUCCESS : DISPLAY_FAILURE;
++    }
++    mBacklightResolved = true;
++    if (FindBacklightNode(mBacklightPath, mBacklightMax) != DISPLAY_SUCCESS) {
++        DISPLAY_LOGW("no controllable backlight found (e.g. QEMU), brightness control disabled");
++        return DISPLAY_FAILURE;
++    }
++    mBacklightFd = open(mBacklightPath.c_str(), O_RDWR | O_CLOEXEC);
++    if (mBacklightFd < 0) {
++        DISPLAY_LOGE("open backlight %{public}s failed %{public}s", mBacklightPath.c_str(), strerror(errno));
++        return DISPLAY_FAILURE;
++    }
++    return DISPLAY_SUCCESS;
++}
++
+ int32_t DrmConnector::GetBrightness(uint32_t &level)
+ {
+-    if (mPropBrightnessId == DRM_INVALID_ID) {
+-        DISPLAY_LOGE("the prop id of brightness is invalid");
+-        //return DISPLAY_NOT_SUPPORT;
++    if (EnsureBacklightResolved() == DISPLAY_SUCCESS) {
++        char buffer[32] = {0};
++        if (lseek(mBacklightFd, 0, SEEK_SET) >= 0) {
++            ssize_t bytes = read(mBacklightFd, buffer, sizeof(buffer) - 1);
++            if (bytes > 0) {
++                uint32_t raw = static_cast<uint32_t>(strtoul(buffer, nullptr, 10));
++                level = (mBacklightMax > 0) ?
++                    static_cast<uint32_t>(static_cast<uint64_t>(raw) * OHOS_BRIGHTNESS_MAX / mBacklightMax) :
++                    mBrightnessLevel;
++                DISPLAY_LOGD("GetBrightness raw %{public}u -> level %{public}u", raw, level);
++                return DISPLAY_SUCCESS;
++            }
++        }
+     }
+     level = mBrightnessLevel;
+- 
+     return DISPLAY_SUCCESS;
+ }
+ 
+ int32_t DrmConnector::SetBrightness(uint32_t level)
+ {
+-    DISPLAY_LOGD("DrmConnector::SetBrightness set %{public}d", level);
+-    static int32_t blFd = 0;
+-    int32_t ret = 0;
+-    int bytes = 0;
+-    char buffer[10];
+-    int32_t light_level;
+-
+-    if (blFd <= 0) {
+-        blFd = open("/sys/class/backlight/backlight/brightness", O_RDWR);
+-        if (blFd < 0) {
+-            DISPLAY_LOGE("DrmConnector::SetBrightness open file error %{public}s", strerror(errno));
+-            return DISPLAY_FAILURE;
+-        }
+-    }
+-    if (level < 0) {
+-        DISPLAY_LOGE("DrmConnector::SetBrightness write error");
++    DISPLAY_LOGD("DrmConnector::SetBrightness set %{public}u", level);
++    if (EnsureBacklightResolved() != DISPLAY_SUCCESS) {
++        // Preserve the legacy behaviour (no backlight -> failure) without
++        // spamming a log on every frame.  QEMU takes this path.
+         return DISPLAY_FAILURE;
+     }
+-    ret = memset_s(buffer, sizeof(buffer), 0, sizeof(buffer));
+-    if (ret < 0) {
+-        DISPLAY_LOGE("DrmConnector::SetBrightness memset_s error");
+-        return DISPLAY_FAILURE;
++    if (level > OHOS_BRIGHTNESS_MAX) {
++        level = OHOS_BRIGHTNESS_MAX;
+     }
+-    light_level = ceil((level / 28));
+-    if (light_level > 7) {
+-        light_level = 7;
++    uint64_t raw = static_cast<uint64_t>(level) * mBacklightMax / OHOS_BRIGHTNESS_MAX;
++    if ((level > 0) && (raw == 0)) {
++        raw = 1; // never fully blank the panel for a non-zero request
+     }
+-    else if (light_level < 1) {
+-         light_level = 1;
++    if (raw > mBacklightMax) {
++        raw = mBacklightMax;
+     }
+-    bytes = sprintf_s(buffer, sizeof(buffer), "%d", light_level);
+-    if (bytes < 0) {
+-        DISPLAY_LOGE("DrmConnector::SetBrightness sprintf_s error");
++
++    char buffer[16] = {0};
++    int bytes = snprintf(buffer, sizeof(buffer), "%u", static_cast<uint32_t>(raw));
++    if (bytes <= 0) {
++        DISPLAY_LOGE("DrmConnector::SetBrightness format raw level failed");
++        return DISPLAY_FAILURE;
++    }
++    if (lseek(mBacklightFd, 0, SEEK_SET) < 0) {
++        DISPLAY_LOGE("DrmConnector::SetBrightness lseek failed %{public}s", strerror(errno));
+         return DISPLAY_FAILURE;
+     }
+-    ret = write(blFd, buffer, bytes);
++    ssize_t ret = write(mBacklightFd, buffer, bytes);
+     if (ret < 0) {
+-        DISPLAY_LOGE("DrmConnector::SetBrightness write error");
++        DISPLAY_LOGE("DrmConnector::SetBrightness write %{public}s failed %{public}s",
++            mBacklightPath.c_str(), strerror(errno));
+         return DISPLAY_FAILURE;
+     }
+ 
+     mBrightnessLevel = level;
+-    DISPLAY_LOGD("DrmConnector::SetBrightness exit !!!!");
+-
++    DISPLAY_LOGD("DrmConnector::SetBrightness level %{public}u -> raw %{public}u (max %{public}u)",
++        level, static_cast<uint32_t>(raw), mBacklightMax);
+     return DISPLAY_SUCCESS;
+ }
+ 
+@@ -199,6 +314,11 @@ void DrmConnector::ConvertToHdiType(uint32_t type, InterfaceType &hdiType)
+         case DRM_MODE_CONNECTOR_DSI:
+             hdiType = DISP_INTF_MIPI;
+             break;
++        case DRM_MODE_CONNECTOR_eDP:
++            // Internal embedded panel (real PTL hardware connects its screen here).
++            hdiType = DISP_INTF_PANEL;
++            break;
++        case DRM_MODE_CONNECTOR_DisplayPort:
+         case DRM_MODE_CONNECTOR_HDMIA:
+         case DRM_MODE_CONNECTOR_HDMIB:
+             hdiType = DISP_INTF_HDMI;
+@@ -246,6 +366,8 @@ int32_t DrmConnector::PickIdleCrtcId(IdMapPtr<DrmEncoder> &encoders, IdMapPtr<Dr
+     }
+ 
+     DISPLAY_LOGW("can not pick a crtc for connector");
++    comp_kmsg::Print("DRM", "Connector PickIdleCrtcId FAIL: connector id=%u encoderId=%u (no usable CRTC, "
++        "possibleEncoders=%zu)", mId, mEncoderId, mPossibleEncoders.size());
+     return DISPLAY_FAILURE;
+ }
+ 
+@@ -277,7 +399,7 @@ std::shared_ptr<DrmCrtc> DrmConnector::UpdateCrtcId(IdMapPtr<DrmEncoder> &encode
+ 
+     for (auto crtcIter = crtcs.begin(); crtcIter != crtcs.end(); ++crtcIter) {
+         auto &posCrts = crtcIter->second;
+-        if (possibleCrtcs == (1<<posCrts->GetPipe())) {
++        if (possibleCrtcs & (1<<posCrts->GetPipe())) {
+             DISPLAY_LOGD("find crtc id %{public}d, pipe %{public}d", posCrts->GetId(), posCrts->GetPipe());
+             crtc = posCrts;
+             *crtc_id = posCrts->GetId();
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_connector.h b/common/virt_full/hardware/display/src/display_device/drm_connector.h
+index b12d610..b914e07 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_connector.h
++++ b/common/virt_full/hardware/display/src/display_device/drm_connector.h
+@@ -103,6 +103,10 @@ public:
+     }
+     int32_t SetDpmsState(uint64_t dmps);
+     bool IsConnected();
++    int GetConnectState() const
++    {
++        return static_cast<int>(mConnectState);
++    }
+     bool HandleHotplug(IdMapPtr<DrmEncoder> &encoders, IdMapPtr<DrmCrtc> &crtcs, bool plugIn);
+     std::shared_ptr<DrmCrtc> UpdateCrtcId(IdMapPtr<DrmEncoder> &encoders, IdMapPtr<DrmCrtc> &crtcs,
+         bool plugIn, drmModeConnectorPtr c, int *crtc_id);
+@@ -113,6 +117,11 @@ private:
+     static void ConvertTypeToName(uint32_t type, std::string &name);
+     static void ConvertToHdiType(uint32_t type, InterfaceType &hdiType);
+ 
++    // Resolve the sysfs backlight node (prefers intel_backlight, then any
++    // non-acpi_video node, then the first one).  Runs once; QEMU has no
++    // /sys/class/backlight entry so this simply disables backlight control.
++    int32_t EnsureBacklightResolved();
++
+     void InitModes(drmModeConnector c);
+     uint32_t mId;
+     InterfaceType mType;
+@@ -129,8 +138,14 @@ private:
+     uint32_t mPropDpmsId = DRM_INVALID_ID;
+     uint64_t mDpmsState = 0;
+     uint32_t mPropCrtcId = DRM_INVALID_ID;
+-    uint32_t mPropBrightnessId = DRM_INVALID_ID;
+     uint32_t mBrightnessLevel = 0;
++    // Backlight sysfs state (real hardware).  mBacklightFd < 0 means "no
++    // controllable backlight" (e.g. QEMU), in which case the old no-op
++    // behaviour is preserved.
++    bool mBacklightResolved = false;
++    int32_t mBacklightFd = -1;
++    uint32_t mBacklightMax = 0;
++    std::string mBacklightPath;
+     std::unordered_map<int32_t, DrmMode> mModes;
+     int32_t mPreferenceId = INVALID_MODE_ID;
+ 
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_device.cpp b/common/virt_full/hardware/display/src/display_device/drm_device.cpp
+index 25a7321..199a596 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_device.cpp
++++ b/common/virt_full/hardware/display/src/display_device/drm_device.cpp
+@@ -21,6 +21,8 @@
+ #include <drm_fourcc.h>
+ #include "display_log.h"
+ #include "drm_display.h"
++#include "drm_node_utils.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+@@ -31,20 +33,27 @@ std::shared_ptr<DrmDevice> DrmDevice::mInstance;
+ std::shared_ptr<HdiDeviceInterface> DrmDevice::Create()
+ {
+     DISPLAY_LOGI("DrmDevice Create begin");
++    comp_kmsg::Print("DRM", "DrmDevice::Create begin");
+     if (mDrmFd == nullptr) {
+-        const std::string name("virtio_gpu");
+-        int drmFd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC); // drmOpen(name.c_str(), nullptr);
++        // QEMU: virtio-gpu is card0; real HW (Intel Xe): the card may be card1 or
++        // later, so enumerate /dev/dri/card* instead of hardcoding card0.
++        const std::string name = FindPreferredDrmNode();
++        comp_kmsg::Print("DRM", "Create: selected DRM node '%s' (open O_RDWR|O_CLOEXEC next)", name.c_str());
++        int drmFd = open(name.c_str(), O_RDWR | O_CLOEXEC); // drmOpen(name.c_str(), nullptr);
+         if (drmFd < 0) {
+             DISPLAY_LOGE("drm file:%{public}s open failed %{public}s", name.c_str(), strerror(errno));
++            comp_kmsg::Print("DRM", "Create FAIL: open('%s') errno=%d(%s)", name.c_str(), errno, strerror(errno));
+             return nullptr;
+         }
+-        DISPLAY_LOGI("DrmDevice Create opened card0 fd=%{public}d", drmFd);
++        DISPLAY_LOGI("DrmDevice Create opened %{public}s fd=%{public}d", name.c_str(), drmFd);
++        comp_kmsg::Print("DRM", "Create: open('%s') OK fd=%d", name.c_str(), drmFd);
+         mDrmFd = std::make_shared<HdiFd>(drmFd);
+     }
+     if (mInstance == nullptr) {
+         mInstance = std::make_shared<DrmDevice>();
+     }
+     DISPLAY_LOGI("DrmDevice Create end instance=%{public}p", mInstance.get());
++    comp_kmsg::Print("DRM", "DrmDevice::Create end instance=%p", static_cast<void*>(mInstance.get()));
+     return mInstance;
+ }
+ 
+@@ -86,6 +95,30 @@ uint32_t DrmDevice::ConvertToDrmFormat(PixelFormat fmtIn)
+     return fmtOut;
+ }
+ 
++uint32_t DrmDevice::ConvertToDrmFormatExact(PixelFormat fmtIn)
++{
++    // DRM fourcc names describe the register value bit order, so on little-endian
++    // the in-memory byte order is reversed: XRGB8888 -> B,G,R,X in memory.
++    // OHOS PixelFormat names describe the in-memory byte order instead.
++    // Only the unambiguous 32bpp formats are mapped here; everything else returns
++    // 0 and the caller falls back to the legacy ConvertToDrmFormat() table.
++    static const PixelFormatConvertTbl exactTable[] = {
++        {DRM_FORMAT_ABGR8888, PIXEL_FMT_RGBA_8888}, // memory R,G,B,A
++        {DRM_FORMAT_ARGB8888, PIXEL_FMT_BGRA_8888}, // memory B,G,R,A
++        {DRM_FORMAT_XBGR8888, PIXEL_FMT_RGBX_8888}, // memory R,G,B,X
++        {DRM_FORMAT_XRGB8888, PIXEL_FMT_BGRX_8888}, // memory B,G,R,X
++    };
++    uint32_t fmtOut = 0;
++    for (uint32_t i = 0; i < sizeof(exactTable) / sizeof(exactTable[0]); i++) {
++        if (exactTable[i].pixFormat == fmtIn) {
++            fmtOut = exactTable[i].drmFormat;
++            break;
++        }
++    }
++    DISPLAY_LOGD("exact fmtIn %{public}d, outFmt %{public}d", fmtIn, fmtOut);
++    return fmtOut;
++}
++
+ DrmDevice::DrmDevice() {}
+ 
+ int32_t DrmDevice::GetCrtcProperty(const DrmCrtc &crtc, const std::string &name, DrmProperty &prop)
+@@ -127,19 +160,32 @@ int32_t DrmDevice::GetProperty(uint32_t objId, uint32_t objType, const std::stri
+ int32_t DrmDevice::Init()
+ {
+     DISPLAY_LOGI("DrmDevice Init begin");
++    comp_kmsg::Print("DRM", "DrmDevice::Init begin fd=%d", GetDrmFd());
+     int ret = drmSetClientCap(GetDrmFd(), DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+-    DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE,
+-        DISPLAY_LOGE("DRM_CLIENT_CAP_UNIVERSAL_PLANES set failed %{public}s", strerror(errno)));
++    if (ret) {
++        comp_kmsg::Print("DRM", "Init FAIL: SetClientCap(UNIVERSAL_PLANES) ret=%d errno=%d(%s)",
++            ret, errno, strerror(errno));
++        return DISPLAY_FAILURE;
++    }
+     ret = drmSetClientCap(GetDrmFd(), DRM_CLIENT_CAP_ATOMIC, 1);
+-    DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE,
+-        DISPLAY_LOGE("DRM_CLIENT_CAP_ATOMIC set failed %{public}s", strerror(errno)));
++    if (ret) {
++        comp_kmsg::Print("DRM", "Init FAIL: SetClientCap(ATOMIC) ret=%d errno=%d(%s)", ret, errno, strerror(errno));
++        return DISPLAY_FAILURE;
++    }
+ 
++    errno = 0;
+     ret = drmSetMaster(GetDrmFd());
+-    DISPLAY_CHK_RETURN((ret), DISPLAY_FAILURE, DISPLAY_LOGE("can not set to master errno : %{public}d", errno));
+-    DISPLAY_LOGE("chenyf master");
++    if (ret) {
++        comp_kmsg::Print("DRM", "Init FAIL: drmSetMaster ret=%d errno=%d(%s)", ret, errno, strerror(errno));
++        return DISPLAY_FAILURE;
++    }
+     ret = drmIsMaster(GetDrmFd());
+-    DISPLAY_CHK_RETURN((!ret), DISPLAY_FAILURE, DISPLAY_LOGE("is not master : %{public}d", errno));
++    if (!ret) {
++        comp_kmsg::Print("DRM", "Init FAIL: drmIsMaster=0 errno=%d(%s)", errno, strerror(errno));
++        return DISPLAY_FAILURE;
++    }
+     DISPLAY_LOGI("DrmDevice Init success fd=%{public}d", GetDrmFd());
++    comp_kmsg::Print("DRM", "DrmDevice::Init OK (master acquired)");
+     return DISPLAY_SUCCESS;
+ }
+ 
+@@ -165,6 +211,7 @@ void DrmDevice::FindAllCrtc(const drmModeResPtr &res)
+         drmModeFreeCrtc(crtc);
+         if (ret != DISPLAY_SUCCESS) {
+             DISPLAY_LOGE("crtc %{public}d init failed", i);
++            comp_kmsg::Print("DRM", "FindAllCrtc: crtc idx=%d id=%u Init failed ret=%d", i, crtc_id, ret);
+             continue;
+         }
+         mCrtcs.emplace(crtc_id, std::move(drmCrtc));
+@@ -201,11 +248,18 @@ void DrmDevice::FindAllConnector(const drmModeResPtr &res)
+         }
+         std::shared_ptr<DrmConnector> drmConnector = std::make_shared<DrmConnector>(*connector, mDrmFd);
+         ret = drmConnector->Init(*this);
++        int rawConnId = connector->connector_id;
++        int rawConnType = connector->connector_type;
++        int rawConnState = connector->connection;
+         drmModeFreeConnector(connector);
+         if (ret != DISPLAY_SUCCESS) {
++            comp_kmsg::Print("DRM", "FindAllConnector: connector id=%d type=%d state=%d Init failed ret=%d",
++                rawConnId, rawConnType, rawConnState, ret);
+             continue;
+         }
+         int connectorId = drmConnector->GetId();
++        comp_kmsg::Print("DRM", "FindAllConnector: connector id=%d type=%d state=%d OK",
++            rawConnId, rawConnType, rawConnState);
+         mConnectors.emplace(connectorId, std::move(drmConnector));
+     }
+     DISPLAY_LOGD("find connector count %{public}zd", mConnectors.size());
+@@ -296,22 +350,55 @@ std::unordered_map<uint32_t, std::shared_ptr<HdiDisplay>> DrmDevice::DiscoveryDi
+     uint32_t dispId;
+     uint32_t connectorId;
+ 
++    comp_kmsg::Print("DRM", "DiscoveryDisplay begin fd=%d", GetDrmFd());
+     dispConnectorIdMaps_.clear();
+     mDisplays.clear();
+     drmModeResPtr res = drmModeGetResources(GetDrmFd());
+-    DISPLAY_CHK_RETURN((res == nullptr), mDisplays, DISPLAY_LOGE("can not get drm resource"));
++    if (res == nullptr) {
++        comp_kmsg::Print("DRM", "DiscoveryDisplay FAIL: drmModeGetResources null errno=%d(%s)",
++            errno, strerror(errno));
++        return mDisplays;
++    }
+     // discovery all drm resource
+     FindAllCrtc(res);
+     FindAllEncoder(res);
+     FindAllConnector(res);
+     FindAllPlane();
++    comp_kmsg::Print("DRM", "DiscoveryDisplay resources: crtcs=%zu encoders=%zu connectors=%zu planes=%zu",
++        mCrtcs.size(), mEncoders.size(), mConnectors.size(), mPlanes.size());
+     DISPLAY_LOGD();
+     // travel all connector
++    comp_kmsg::Print("DRM", "DiscoveryDisplay: scanning %zu connector(s)", mConnectors.size());
++    size_t connIndex = 0;
+     for (auto &connectorPair : mConnectors) {
+         auto connector = connectorPair.second;
++        const uint32_t cid = connector->GetId();
++        const int connState = connector->GetConnectState();
++        const bool connected = connector->IsConnected();
++        comp_kmsg::Print("DRM", "DiscoveryDisplay: [%zu/%zu] connector id=%u state=%d connected=%d (enter)",
++            connIndex, mConnectors.size(), cid, connState, connected ? 1 : 0);
++        connIndex++;
++
++        // Only a connected connector may own a CRTC/display.  Previously a
++        // DrmDisplay was created for *every* connector whose encoder could
++        // pick a CRTC, including disconnected DP/HDMI ports (state=2).  Those
++        // displays have no mode and no valid panel, yet they still take part
++        // in CRTC picking / plane binding and are registered into the HDI
++        // display list.  On real hardware (Intel Xe with idle DP/HDMI ports)
++        // this let a disconnected connector claim the CRTC and left the real
++        // eDP panel without a usable mode, so composer_host never produced a
++        // scanout (black screen) and could block in the DRM atomic commit.
++        if (!connected) {
++            comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u state=%d NOT connected, skip",
++                cid, connState);
++            continue;
++        }
++
+         uint32_t crtcId = 0;
+         int32_t ret = connector->PickIdleCrtcId(mEncoders, mCrtcs, crtcId);
+         if (ret != DISPLAY_SUCCESS) {
++            comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u PickIdleCrtcId failed ret=%d (skipped)",
++                connector->GetId(), ret);
+             continue;
+         }
+         DISPLAY_LOGD();
+@@ -319,20 +406,31 @@ std::unordered_map<uint32_t, std::shared_ptr<HdiDisplay>> DrmDevice::DiscoveryDi
+         auto crtcIter = mCrtcs.find(crtcId);
+         if (crtcIter == mCrtcs.end()) {
+             DISPLAY_LOGE("can not find crtc for the id %{public}d", connector->GetId());
++            comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u crtcId=%u not found in map",
++                connector->GetId(), crtcId);
+             continue;
+         }
+         DISPLAY_LOGD();
+         auto crtc = crtcIter->second;
+         // create the display
+         std::shared_ptr<HdiDisplay> display = std::make_shared<DrmDisplay>(connector, crtc, mInstance);
+-        DISPLAY_LOGD();
+-        display->Init();
++        comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u crtcId=%u -> DrmDisplay created, Init next",
++            cid, crtcId);
++        int32_t initRet = display->Init();
+         dispId = display->GetId();
+-        connectorId = connector->GetId();
++        connectorId = cid;
++        if (initRet != DISPLAY_SUCCESS) {
++            comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u display id=%u Init FAILED ret=%d (dropped)",
++                cid, dispId, initRet);
++            continue;
++        }
+         mDisplays.emplace(dispId, std::move(display));
+         dispConnectorIdMaps_.emplace(dispId, connectorId);
++        comp_kmsg::Print("DRM", "DiscoveryDisplay: connector id=%u registered as display id=%u (total=%zu)",
++            cid, dispId, mDisplays.size());
+     }
+     DISPLAY_LOGD("find display size %{public}zd", mDisplays.size());
++    comp_kmsg::Print("DRM", "DiscoveryDisplay end displays=%zu", mDisplays.size());
+     return mDisplays;
+ }
+ } // namespace OHOS
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_device.h b/common/virt_full/hardware/display/src/display_device/drm_device.h
+index ac2be67..4609410 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_device.h
++++ b/common/virt_full/hardware/display/src/display_device/drm_device.h
+@@ -58,6 +58,10 @@ class DrmDevice : public HdiDeviceInterface, std::enable_shared_from_this<DrmDev
+ public:
+     static std::shared_ptr<HdiDeviceInterface> Create();
+     static uint32_t ConvertToDrmFormat(PixelFormat fmtIn);
++    // Map a PixelFormat to the DRM fourcc that matches the actual in-memory byte
++    // layout (unlike ConvertToDrmFormat, which keeps the legacy QEMU mapping).
++    // Returns 0 when there is no exact mapping.
++    static uint32_t ConvertToDrmFormatExact(PixelFormat fmtIn);
+     static int GetDrmFd();
+     DrmDevice();
+     ~DrmDevice() override {}

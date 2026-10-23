@@ -1,0 +1,404 @@
+diff --git a/rosen/modules/composer/hdi_backend/src/hdi_device_impl.cpp b/rosen/modules/composer/hdi_backend/src/hdi_device_impl.cpp
+index d44f60ec5c..9d4d3b0f69 100644
+--- a/rosen/modules/composer/hdi_backend/src/hdi_device_impl.cpp
++++ b/rosen/modules/composer/hdi_backend/src/hdi_device_impl.cpp
+@@ -19,6 +19,7 @@
+ #include <cstddef>
+ #include <cstdlib>
+ #include <mutex>
++#include <unistd.h>
+ #include <scoped_bytrace.h>
+ #include <securec.h>
+ #include "platform/common/rs_log.h"
+@@ -81,9 +82,25 @@ HdiDeviceImpl::~HdiDeviceImpl()
+ bool HdiDeviceImpl::Init()
+ {
+     if (g_composer == nullptr) {
+-        g_composer = Composer::V1_5::IDisplayComposerInterface::Get();
++        /*
++         * fix_crash: on real hardware the composer service can be present in the devmgr
++         * registry while its stub / DRM(xe) path is not yet usable, so a single Get() may
++         * return a null (or not-yet-valid) interface. Cache only a non-null interface and
++         * retry a bounded number of times, so RS never proceeds with an invalid composer
++         * (which is what turns a transient service problem into a SIGSEGV + ExecReboot panic).
++         */
++        constexpr int32_t kMaxTry = 50;
++        constexpr int32_t kRetryIntervalUs = 100000; /* 100ms -> up to ~5s */
++        for (int32_t i = 0; i < kMaxTry && g_composer == nullptr; ++i) {
++            g_composer = Composer::V1_5::IDisplayComposerInterface::Get();
++            if (g_composer == nullptr) {
++                HLOGE("IDisplayComposerInterface::Get return nullptr (try %{public}d/%{public}d), retry",
++                    i + 1, kMaxTry);
++                usleep(kRetryIntervalUs);
++            }
++        }
+         if (g_composer == nullptr) {
+-            HLOGE("IDisplayComposerInterface::Get return nullptr.");
++            HLOGE("IDisplayComposerInterface::Get return nullptr after %{public}d retries.", kMaxTry);
+             return false;
+         }
+     }
+@@ -185,7 +202,16 @@ int32_t HdiDeviceImpl::GetScreenCapability(uint32_t screenId, GraphicDisplayCapa
+         info.propertyCount = hdiInfo.propertyCount;
+         info.props.clear();
+         info.props.reserve(hdiInfo.propertyCount);
+-        for (uint32_t i = 0; i < hdiInfo.propertyCount; i++) {
++        /*
++         * fix_crash: the service may report propertyCount > 0 while the properties vector is
++         * empty/truncated (e.g. a partially filled reply). Bounding by props.size() avoids an
++         * out-of-bounds read that would otherwise crash RS on real hardware.
++         */
++        if (hdiInfo.props.size() < hdiInfo.propertyCount) {
++            HLOGW("GetDisplayCapability: propertyCount=%{public}u but props.size()=%{public}zu, clamp",
++                hdiInfo.propertyCount, hdiInfo.props.size());
++        }
++        for (uint32_t i = 0; i < hdiInfo.propertyCount && i < hdiInfo.props.size(); i++) {
+             GraphicPropertyObject graphicProperty = {
+                 .name = hdiInfo.props[i].name,
+                 .propId = hdiInfo.props[i].propId,
+diff --git a/rosen/modules/render_service/composer/composer_service/external_depend/engine/rs_base_render_util.cpp b/rosen/modules/render_service/composer/composer_service/external_depend/engine/rs_base_render_util.cpp
+index b5819babf5..0c9a1227d6 100644
+--- a/rosen/modules/render_service/composer/composer_service/external_depend/engine/rs_base_render_util.cpp
++++ b/rosen/modules/render_service/composer/composer_service/external_depend/engine/rs_base_render_util.cpp
+@@ -1274,7 +1274,8 @@ void RSBaseRenderUtil::DealWithSurfaceRotationAndGravity(GraphicTransformType tr
+     }
+ 
+     if (nodeParams != nullptr) {
+-        RS_LOGE("RSBaseRenderUtil::DealWithSurfaceRotationAndGravity, GetSurfaceBufferOpaque:%{public}d",
++        // Runs once per surface per frame: keep it out of the error log.
++        RS_LOGD("RSBaseRenderUtil::DealWithSurfaceRotationAndGravity, GetSurfaceBufferOpaque:%{public}d",
+             nodeParams->GetSurfaceBufferOpaque());
+     }
+ 
+diff --git a/rosen/modules/render_service/core/feature/watermark/rs_surface_watermark.cpp b/rosen/modules/render_service/core/feature/watermark/rs_surface_watermark.cpp
+index df2cd90d2a..4dd8acd654 100644
+--- a/rosen/modules/render_service/core/feature/watermark/rs_surface_watermark.cpp
++++ b/rosen/modules/render_service/core/feature/watermark/rs_surface_watermark.cpp
+@@ -26,7 +26,10 @@ void RSSurfaceWatermarkHelper::DrawCommSurfaceWatermark(RSPaintFilterCanvas& can
+     const RSSurfaceRenderParams& params)
+ {
+     if (params.IsSystemWatermarkEmpty() && params.IsCustomWatermarkEmpty()) {
+-        RS_LOGE("RSSurfaceWatermarkHelper::DrawCommSurfaceWatermark Name:%{public}s Id:%{public}" PRIu64
++        // No watermark is configured: this is the normal case, not an error.
++        // This function runs once per surface per frame, so logging it at ERROR
++        // level floods hilog (and the render thread) for nothing.
++        RS_LOGD("RSSurfaceWatermarkHelper::DrawCommSurfaceWatermark Name:%{public}s Id:%{public}" PRIu64
+             " water mark count is zero", params.GetName().c_str(), params.GetId());
+         return;
+     }
+diff --git a/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.cpp b/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.cpp
+index b48c68d83f..2a614e78ba 100644
+--- a/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.cpp
++++ b/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.cpp
+@@ -576,8 +576,12 @@ void RSMainThread::Init(const std::shared_ptr<AppExecFwk::EventHandler>& handler
+ #ifdef RS_ENABLE_GPU
+         RSUifirstManager::Instance().PrepareCurrentFrameEvent();
+ #endif
+-        hgmRenderContext_->NotifyRpHgmFrameRate(vsyncId_, context_,
+-            rsVsyncRateReduceManager_.GetVrateMap(), rsVsyncRateReduceManager_.CheckNeedNotify(), pipelineParam_);
++        if (hgmRenderContext_ != nullptr) {
++            /* fix_frameinfo: same null hazard as SetFrameInfo(); never deref a null HGM context. */
++            hgmRenderContext_->NotifyRpHgmFrameRate(vsyncId_, context_,
++                rsVsyncRateReduceManager_.GetVrateMap(), rsVsyncRateReduceManager_.CheckNeedNotify(),
++                pipelineParam_);
++        }
+         RS_PROFILER_ON_RENDER_BEGIN();
+         // cpu boost feature start
+         ffrt_cpu_boost_start(CPUBOOST_START_POINT);
+@@ -733,6 +737,22 @@ void RSMainThread::Init(const std::shared_ptr<AppExecFwk::EventHandler>& handler
+         RS_LOGW("Add watchdog thread failed");
+     }
+     InitRSEventDetector();
++    /*
++     * fix_frameinfo: create the HGM context *before* the receiver is armed and before the
++     * RS_ENABLE_GL GPU-context block below (which used to `return` early). SetFrameInfo()
++     * (called from OnVsync()/ForceRefreshForUni()) unconditionally reads
++     * hgmRenderContext_->GetLtpoEnabled(); if Init returned early (on real hardware
++     * GetDrGPUContext() can be momentarily null), hgmRenderContext_ stayed null and the
++     * first vsync after screen connect dereferenced address 0xb2
++     * (RSMainThread::SetFrameInfo+0x19c) -> SIGSEGV -> init panic-reboot. Building it here
++     * closes that initialization window. It does not depend on anything created later.
++     */
++    hwcContext_ = std::make_shared<RSHwcContext>(
++        HWCParam::GetSourceTuningForAppMap(), HWCParam::GetSolidColorLayerMap());
++    hgmRenderContext_ = std::make_shared<HgmRenderContext>(renderToServiceConnection);
++    hgmRenderContext_->InitHgmConfig(hwcContext_->GetMutableSourceTuningConfig(),
++        hwcContext_->GetMutableSolidLayerConfig(), context_->GetMutableUiFrameworkTypeTable());
++
+     receiver_ = receiver;
+     if (!isUniRender_) {
+         renderEngine_ = std::make_shared<RSRenderEngine>();
+@@ -832,11 +852,8 @@ void RSMainThread::Init(const std::shared_ptr<AppExecFwk::EventHandler>& handler
+ #endif
+     RSSystemProperties::WatchSystemProperty(ENABLE_DEBUG_FMT_TRACE, OnFmtTraceSwitchCallback, nullptr);
+ 
+-    hwcContext_ = std::make_shared<RSHwcContext>(
+-        HWCParam::GetSourceTuningForAppMap(), HWCParam::GetSolidColorLayerMap());
+-    hgmRenderContext_ = std::make_shared<HgmRenderContext>(renderToServiceConnection);
+-    hgmRenderContext_->InitHgmConfig(hwcContext_->GetMutableSourceTuningConfig(),
+-        hwcContext_->GetMutableSolidLayerConfig(), context_->GetMutableUiFrameworkTypeTable());
++    /* fix_frameinfo: hwcContext_/hgmRenderContext_ are created earlier (right after
++     * InitRSEventDetector) so a frame callback can never observe a null HGM context. */
+ 
+     RegisterScreenSwitchFinishCallback(renderToServiceConnection);
+ 
+@@ -5311,6 +5328,42 @@ void RSMainThread::ForceRefreshForUni(bool needDelay)
+     }
+ }
+ 
++void RSMainThread::NotifyBackdropFilterNodeAppeared(uint64_t nodeId)
++{
++    // Workaround: under virgl the first frame(s) that draw a newly appeared backdrop-filter
++    // (blur) node may composite incompletely (only part of the blurred panel ends up in the
++    // display buffer). A single forced full-frame refresh right after such a node first shows
++    // up makes the result correct without any user input (a mouse move would do the same).
++    // Bounded by count/interval so it cannot turn into a per-frame full redraw.
++    constexpr int32_t MAX_FORCE_REFRESH_COUNT = 12;
++    constexpr int64_t MIN_FORCE_REFRESH_INTERVAL_MS = 1000;
++    constexpr int64_t MAX_BOOT_WINDOW_MS = 600000; // only work around the post-boot race
++    if (backdropFilterForceRefreshCount_ >= MAX_FORCE_REFRESH_COUNT) {
++        return;
++    }
++    int64_t now = GetCurrentSystimeMs();
++    if (firstBackdropFilterTimeMs_ == 0) {
++        firstBackdropFilterTimeMs_ = now;
++    }
++    if (now - firstBackdropFilterTimeMs_ > MAX_BOOT_WINDOW_MS) {
++        return;
++    }
++    // Check the interval before marking the node as seen: a node that arrives during the
++    // cooldown must stay eligible, otherwise it would be dropped without ever forcing.
++    if (now - lastBackdropFilterForceTimeMs_ < MIN_FORCE_REFRESH_INTERVAL_MS) {
++        return;
++    }
++    if (!backdropFilterNodesSeen_.insert(nodeId).second) {
++        return;
++    }
++    lastBackdropFilterForceTimeMs_ = now;
++    ++backdropFilterForceRefreshCount_;
++    RS_LOGI("RSFILTDBG NotifyBackdropFilterNodeAppeared: force full refresh for new backdrop filter node %{public}"
++        PRIu64 " (count:%{public}d)", nodeId, backdropFilterForceRefreshCount_);
++    SetDirtyFlag();
++    ForceRefreshForUni();
++}
++
+ void RSMainThread::PostForceRefreshTask()
+ {
+     if (!IsRequestedNextVSync()) {
+@@ -6074,7 +6127,16 @@ void RSMainThread::SetFrameInfo(uint64_t frameCount, bool forceRefreshFlag)
+     uint32_t currentRate = pipelineParam_.pendingScreenRefreshRate ? pipelineParam_.pendingScreenRefreshRate :
+         GetRefreshRate();
+     int64_t idealPeriod = IDEAL_PERIOD.count(currentRate) ? IDEAL_PERIOD[currentRate] : 0;
+-    bool ltpoEnabled = hgmRenderContext_->GetLtpoEnabled();
++    /*
++     * fix_frameinfo: defensive null check, matching CheckAdaptiveCompose(). hgmRenderContext_
++     * is created early in Init() now, but a frame must never dereference a null context: this
++     * is exactly the reported real-hardware SIGSEGV (addr=0xb2, GetLtpoEnabled() reads
++     * ltpoEnabled_ at offset 0xb2 off a null HgmRenderContext). Treat LTPO as disabled.
++     */
++    bool ltpoEnabled = (hgmRenderContext_ != nullptr) && hgmRenderContext_->GetLtpoEnabled();
++    if (hgmRenderContext_ == nullptr) {
++        RS_LOGW("SetFrameInfo: hgmRenderContext_ is nullptr, report ltpoEnabled=false");
++    }
+     frameDeadline.ReportRsFrameDeadline(currentRate, idealPeriod, ltpoEnabled, forceRefreshFlag);
+ }
+ 
+diff --git a/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.h b/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.h
+index 8d19fa50cb..4996d3fbbc 100644
+--- a/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.h
++++ b/rosen/modules/render_service/core/pipeline/main_thread/rs_main_thread.h
+@@ -262,6 +262,9 @@ public:
+     bool CheckFastCompose(int64_t bufferTimeStamp);
+     bool CheckAdaptiveCompose();
+     void ForceRefreshForUni(bool needDelay = false);
++    // Workaround for virgl: force one full-frame refresh when a backdrop-filter (blur) node
++    // newly appears, so its composited result lands correctly in the display buffer.
++    void NotifyBackdropFilterNodeAppeared(uint64_t nodeId);
+         void PostForceRefreshTask();
+     void RemoveForceRefreshTask();
+     void DumpMem(std::unordered_set<std::u16string>& argSets, std::string& result, std::string& type,
+@@ -742,6 +745,11 @@ private:
+     bool isMultiDisplayPre_ = false;
+     bool isMultiDisplayChange_ = false;
+     std::atomic<bool> isDirty_ = false;
++    // workaround for virgl backdrop-filter first-frame compositing (see NotifyBackdropFilterNodeAppeared)
++    std::unordered_set<uint64_t> backdropFilterNodesSeen_;
++    int32_t backdropFilterForceRefreshCount_ = 0;
++    int64_t firstBackdropFilterTimeMs_ = 0;
++    int64_t lastBackdropFilterForceTimeMs_ = 0;
+     bool prevHdrSwitchStatus_ = true;
+     std::atomic<bool> screenPowerOnChanged_ = false;
+     std::atomic_bool doWindowAnimate_ = false;
+diff --git a/rosen/modules/render_service/core/pipeline/main_thread/rs_uni_render_visitor.cpp b/rosen/modules/render_service/core/pipeline/main_thread/rs_uni_render_visitor.cpp
+index 488dbd7061..8467f6c2da 100644
+--- a/rosen/modules/render_service/core/pipeline/main_thread/rs_uni_render_visitor.cpp
++++ b/rosen/modules/render_service/core/pipeline/main_thread/rs_uni_render_visitor.cpp
+@@ -3840,6 +3840,9 @@ CM_INLINE void RSUniRenderVisitor::PostPrepare(RSRenderNode& node, bool isParent
+         CollectFilterInfoAndUpdateDirty(node, *curDirtyManager);
+         node.SetGlobalAlpha(curAlpha_);
+     }
++    if (node.GetRenderProperties().GetBackgroundFilter() != nullptr) {
++        RSMainThread::Instance()->NotifyBackdropFilterNodeAppeared(node.GetId());
++    }
+     auto nodeParent = node.GetParent().lock();
+     CollectEffectInfo(node, isBlendNeedFilter, nodeParent);
+     node.NodePostPrepare(curSurfaceNode_, prepareClipRect_);
+diff --git a/rosen/modules/render_service/core/transaction/rs_unmarshal_thread.cpp b/rosen/modules/render_service/core/transaction/rs_unmarshal_thread.cpp
+index 8691f8efb2..65c2fdd049 100644
+--- a/rosen/modules/render_service/core/transaction/rs_unmarshal_thread.cpp
++++ b/rosen/modules/render_service/core/transaction/rs_unmarshal_thread.cpp
+@@ -155,7 +155,13 @@ void RSUnmarshalThread::RecvParcel(std::shared_ptr<MessageParcel>& parcel, bool
+             return;
+         }
+         transData->SetCallingPid(callingPid);
+-        RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transData, *parcel, callingPid);
++        if (callingPid > 0) {
++            // GetCallingPid() may be 0 for asynchronous binder calls. Keep the client-written pid_
++            // (restored by Unmarshalling) in that case, so the transaction is bucketed under the pid
++            // registered for the per-process render connection instead of being dropped by
++            // RSMainThread::MergeToEffectiveTransactionDataMap.
++            RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transData, *parcel, callingPid);
++        }
+         if (isNonSystemAppCalling) {
+             const auto& nodeMap = RSMainThread::Instance()->GetContext().GetNodeMap();
+             if (!transData->IsCallingPidValid(callingPid, nodeMap)) {
+diff --git a/rosen/modules/render_service/core/transaction/zidl/rs_client_to_render_connection_stub.cpp b/rosen/modules/render_service/core/transaction/zidl/rs_client_to_render_connection_stub.cpp
+index bf9dee1479..a260db3b8c 100644
+--- a/rosen/modules/render_service/core/transaction/zidl/rs_client_to_render_connection_stub.cpp
++++ b/rosen/modules/render_service/core/transaction/zidl/rs_client_to_render_connection_stub.cpp
+@@ -357,7 +357,11 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
+                     auto transactionData = RSBaseRenderUtil::ParseTransactionData(data, parcelNumber);
+                     if (transactionData) {
+                         transactionData->SetCallingPid(callingPid);
+-                        RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transactionData, data, callingPid);
++                        if (callingPid > 0) {
++                            // Async binder calls may report callingPid 0; keep the client-written pid_
++                            // so the transaction still matches its registered render connection.
++                            RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transactionData, data, callingPid);
++                        }
+                     }
+                     if (transactionData && isNonSystemAppCalling) {
+                         const auto& nodeMap = RSMainThread::Instance()->GetContext().GetNodeMap();
+@@ -408,7 +412,11 @@ int RSClientToRenderConnectionStub::OnRemoteRequest(
+                 }
+                 if (transactionData) {
+                     transactionData->SetCallingPid(callingPid);
+-                    RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transactionData, *parsedParcel, callingPid);
++                    if (callingPid > 0) {
++                        // Async binder calls may report callingPid 0; keep the client-written pid_
++                        // so the transaction still matches its registered render connection.
++                        RS_PROFILER_SET_TRANSACTION_SENDING_PID(*transactionData, *parsedParcel, callingPid);
++                    }
+                 }
+                 if (transactionData && isNonSystemAppCalling) {
+                     const auto& nodeMap = RSMainThread::Instance()->GetContext().GetNodeMap();
+diff --git a/rosen/modules/render_service/main/render_server/dfx/rs_service_dumper.cpp b/rosen/modules/render_service/main/render_server/dfx/rs_service_dumper.cpp
+index c5887180e9..62131426cc 100644
+--- a/rosen/modules/render_service/main/render_server/dfx/rs_service_dumper.cpp
++++ b/rosen/modules/render_service/main/render_server/dfx/rs_service_dumper.cpp
+@@ -115,6 +115,35 @@ static void DestroyGLES()
+     eglTerminate(g_tmpDisplay);
+     g_tmpDisplay = EGL_NO_DISPLAY;
+ }
++
++// [diag] Report the GL/EGL backend actually in use at RS startup.
++//
++// The hidumper "-a gles" dump path needs the DUMP permission and is therefore
++// unavailable on some builds (see DumpManagerService::HasDumpPermission).
++// Without it there is no way to tell hardware acceleration from the software
++// rasterizer (swrast/llvmpipe), which is the first thing to check when the
++// whole UI feels slow.  Log it once at startup so the backend is always
++// visible in hilog, independent of any permission.
++static void LogGLBackend()
++{
++    InitGLES();
++    if (g_tmpContext == EGL_NO_CONTEXT) {
++        RS_LOGE("GLBackend: failed to create EGL context");
++        return;
++    }
++    const char *vendor = reinterpret_cast<const char *>(glGetString(GL_VENDOR));
++    const char *renderer = reinterpret_cast<const char *>(glGetString(GL_RENDERER));
++    const char *version = reinterpret_cast<const char *>(glGetString(GL_VERSION));
++    const char *glsl = reinterpret_cast<const char *>(glGetString(GL_SHADING_LANGUAGE_VERSION));
++    const char *eglVendor = reinterpret_cast<const char *>(eglQueryString(g_tmpDisplay, EGL_VENDOR));
++    const char *eglVersion = reinterpret_cast<const char *>(eglQueryString(g_tmpDisplay, EGL_VERSION));
++    RS_LOGI("GLBackend: GL_VENDOR=%{public}s GL_RENDERER=%{public}s GL_VERSION=%{public}s "
++        "GLSL_VERSION=%{public}s EGL_VENDOR=%{public}s EGL_VERSION=%{public}s",
++        vendor ? vendor : "Unknown", renderer ? renderer : "Unknown",
++        version ? version : "Unknown", glsl ? glsl : "Unknown",
++        eglVendor ? eglVendor : "Unknown", eglVersion ? eglVersion : "Unknown");
++    DestroyGLES();
++}
+ #endif
+ 
+ void RSServiceDumper::RsDumpInit(std::shared_ptr<RSServiceDumpManager> rsDumpManager)
+@@ -124,6 +153,12 @@ void RSServiceDumper::RsDumpInit(std::shared_ptr<RSServiceDumpManager> rsDumpMan
+     RegisterMemFuncs(rsDumpManager);
+     RegisterFpsFuncs(rsDumpManager);
+     RegisterRSGfxFuncs(rsDumpManager);
++
++#ifdef RS_ENABLE_GPU
++    // [diag] Print the GL backend once at startup: it must be visible even
++    // when the hidumper DUMP permission is not granted on this build.
++    ScheduleTask([]() { LogGLBackend(); });
++#endif
+ }
+ 
+ void RSServiceDumper::RegisterRSGfxFuncs(std::shared_ptr<RSServiceDumpManager> rsDumpManager)
+diff --git a/rosen/modules/render_service_base/src/platform/ohos/rs_system_properties.cpp b/rosen/modules/render_service_base/src/platform/ohos/rs_system_properties.cpp
+index ed0200fdae..5ae99140d8 100755
+--- a/rosen/modules/render_service_base/src/platform/ohos/rs_system_properties.cpp
++++ b/rosen/modules/render_service_base/src/platform/ohos/rs_system_properties.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "platform/common/rs_system_properties.h"
+ 
++#include <atomic>
+ #include <charconv>
+ #include <cstdlib>
+ #include <mutex>
+@@ -194,12 +195,22 @@ std::string RSSystemProperties::GetRecordingFile()
+ 
+ bool RSSystemProperties::GetUniRenderEnabled()
+ {
+-    static std::once_flag onceFlag;
+-    std::call_once(onceFlag, []() {
+-        isUniRenderEnabled_ = std::static_pointer_cast<RSRenderServiceClient>(
++    // Do not latch the very first result if it is false. During early process start-up the query can
++    // run before RenderService is reachable (RSRenderServiceClient::GetUniRenderEnabled() returns
++    // false when the client-to-service connection is not up yet). Latching that transient false made
++    // the process permanently treat itself as "divided render": no per-process render connection is
++    // created, no pid is registered, and every client transaction is later dropped by
++    // RSMainThread::MergeToEffectiveTransactionDataMap. Keep re-evaluating until it reports true.
++    static std::atomic<bool> uniRenderResolved { false };
++    if (!uniRenderResolved.load(std::memory_order_acquire)) {
++        bool enabled = std::static_pointer_cast<RSRenderServiceClient>(
+             RSIRenderClient::CreateRenderServiceClient())->GetUniRenderEnabled();
+-        ROSEN_LOGD("RSSystemProperties::GetUniRenderEnabled:%{public}d", isUniRenderEnabled_);
+-    });
++        ROSEN_LOGD("RSSystemProperties::GetUniRenderEnabled:%{public}d", enabled);
++        if (enabled) {
++            isUniRenderEnabled_ = true;
++            uniRenderResolved.store(true, std::memory_order_release);
++        }
++    }
+     return isUniRenderEnabled_;
+ }
+ 
+diff --git a/rosen/modules/render_service_base/src/render/rs_filter_cache_manager.cpp b/rosen/modules/render_service_base/src/render/rs_filter_cache_manager.cpp
+index a88dab2b77..a0c38ec56a 100644
+--- a/rosen/modules/render_service_base/src/render/rs_filter_cache_manager.cpp
++++ b/rosen/modules/render_service_base/src/render/rs_filter_cache_manager.cpp
+@@ -401,6 +401,12 @@ void RSFilterCacheManager::DrawCachedFilteredSnapshot(RSPaintFilterCanvas& canva
+     // Draw in device coordinates.
+     Drawing::AutoCanvasRestore autoRestore(canvas, true);
+     canvas.ResetMatrix();
++    // The surface canvas may carry a partial region clip (screen damage / visible-region tracking).
++    // When the cached image is drawn with that clip, only the clipped part of the filter rect is
++    // painted and the rest keeps stale content (backdrop blur drawn only on the upper part). The
++    // cached image already covers the whole cachedRect_, so reset the clip and let the draw cover
++    // the full dstRect.
++    canvas.ResetClip();
+ 
+     // The cache type and parameters has been validated, dstRect must be subset of cachedFilteredSnapshot_->cachedRect_.
+     Drawing::Rect dst = {dstRect.GetLeft(), dstRect.GetTop(), dstRect.GetRight(), dstRect.GetBottom()};

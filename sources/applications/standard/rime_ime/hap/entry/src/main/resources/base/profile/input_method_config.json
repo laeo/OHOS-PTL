@@ -1,0 +1,18 @@
+{
+  "subtypes": [
+    {
+      "id": "rime_pinyin",
+      "label": "$string:rime_pinyin_label",
+      "icon": "$media:icon",
+      "mode": "lower",
+      "locale": "zh-CN"
+    },
+    {
+      "id": "rime_pinyin_en",
+      "label": "$string:rime_pinyin_en_label",
+      "icon": "$media:icon",
+      "mode": "lower",
+      "locale": "en-US"
+    }
+  ]
+}

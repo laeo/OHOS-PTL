@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding="utf-8"?>
+<!--
+ * Copyright (c) 2026 Huawei Device Co., Ltd.
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ -->
+ <Configs>
+    <!-- Window display dpi, valid range is 80~640, use 0 if no configuration is required.
+         Measured on the Panther Lake reference panel (eDP-1):
+           3072x1920 px, 350x220 mm  ->  ~223 PPI (16.3" diagonal).
+         Nearest OHOS density bucket is 240 (scale 1.5x) -> logical ~2048x1280 vp.
+         Tunable at bring-up: 320 (2.0x, ~1536x960) if the UI looks too large,
+         360 (2.25x) to match tablet/2in1 panels.
+         This file lives in /sys_prod/etc/window/resources/, which GetOneCfgFile()
+         prefers over the /system default (order: chip_prod > sys_prod > system). -->
+    <dpi>240</dpi>
+    <!-- Indicate the deviation between the default device display direction and the direction -->
+    <!-- of the sensor. Use 0 in default, available values are {0, 90, 180, 270} -->
+    <defaultDeviceRotationOffset>0</defaultDeviceRotationOffset>
+    <!-- Svg path for cutout, use empty string if there is not cutout on the screen -->
+    <defaultDisplayCutoutPath></defaultDisplayCutoutPath>
+    <curvedScreenBoundary>0 0 0 0</curvedScreenBoundary>
+    <isWaterfallDisplay enable="false"></isWaterfallDisplay>
+    <isWaterfallAreaCompressionEnableWhenHorizontal enable="false"></isWaterfallAreaCompressionEnableWhenHorizontal>
+    <waterfallAreaCompressionSizeWhenHorzontal>0</waterfallAreaCompressionSizeWhenHorzontal>
+    <buildInDefaultOrientation>0</buildInDefaultOrientation>
+ </Configs>

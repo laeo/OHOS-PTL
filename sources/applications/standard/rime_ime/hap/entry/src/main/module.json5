@@ -1,0 +1,43 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:entry_desc",
+    "mainElement": "RimeSettingsAbility",
+    "deviceTypes": [
+      "default",
+      "tablet"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "pages": "$profile:main_pages",
+    "abilities": [
+      {
+        "name": "RimeSettingsAbility",
+        "srcEntry": "./ets/settings/RimeSettingsAbility.ets",
+        "description": "$string:settings_ability_descripter",
+        "icon": "$media:icon",
+        "label": "$string:settings_ability_label",
+        "startWindowIcon": "$media:icon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "RimeImeService",
+        "srcEntry": "./ets/ime/RimeImeService.ets",
+        "type": "inputMethod",
+        "description": "$string:extension_ability_descripter",
+        "label": "$string:ime_label",
+        "exported": true,
+        "metadata": [
+          {
+            "name": "ohos.extension.input_method",
+            "resource": "$profile:input_method_config"
+          }
+        ]
+      }
+    ]
+  }
+}

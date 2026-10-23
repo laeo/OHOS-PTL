@@ -1,0 +1,7 @@
+{
+  "modelVersion": "26.0.0",
+  "name": "rimeime",
+  "version": "1.0.0",
+  "description": "Rime (librime + rime-ice) input method for OpenHarmony PC",
+  "dependencies": {}
+}

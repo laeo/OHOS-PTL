@@ -1,0 +1,10 @@
+{
+  "modelVersion": "26.0.0",
+  "dependencies": {},
+  "debugging": {
+    "stacktrace": true
+  },
+  "nodeOptions": {
+    "maxOldSpaceSize": 40000
+  }
+}

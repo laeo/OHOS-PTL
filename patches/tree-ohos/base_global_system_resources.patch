@@ -1,0 +1,15 @@
+diff --git a/systemres/main/resources/2in1/element/float_sys.json b/systemres/main/resources/2in1/element/float_sys.json
+index 7d0e2635..1e7c9818 100644
+--- a/systemres/main/resources/2in1/element/float_sys.json
++++ b/systemres/main/resources/2in1/element/float_sys.json
+@@ -168,6 +168,10 @@
+             "name": "textfield_border_radius",
+             "value": "$float:corner_radius_level4"
+         },
++        {
++            "name": "textfield_independent_control_keyboard",
++            "value": "1.0"
++        },
+         {
+             "name": "menu_animation_duration",
+             "value": "100"

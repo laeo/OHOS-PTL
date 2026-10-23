@@ -1,0 +1,373 @@
+diff --git a/AiraBrowser/build-profile.json5 b/AiraBrowser/build-profile.json5
+index d1ea002..3f8186d 100644
+--- a/AiraBrowser/build-profile.json5
++++ b/AiraBrowser/build-profile.json5
+@@ -6,6 +6,7 @@
+     "products": [
+       {
+         "name": "default",
++        "compileSdkVersion": "26.0.0",
+         "compatibleSdkVersion": "6.1.0(23)",
+         "targetSdkVersion": "6.1.0(23)",
+         "runtimeOS": "HarmonyOS",
+diff --git a/AiraBrowser/entry/build-profile.json5 b/AiraBrowser/entry/build-profile.json5
+index 62110b4..e489159 100755
+--- a/AiraBrowser/entry/build-profile.json5
++++ b/AiraBrowser/entry/build-profile.json5
+@@ -1,11 +1,10 @@
+ {
+   "apiType": "stageMode",
+   "buildOption": {
+-    "externalNativeOptions": {
+-      "path": "./src/main/cpp/CMakeLists.txt",
+-      "arguments": "",
+-      "cppFlags": ""
+-    },
++    // [fix_aira_guide] Native build disabled on purpose: the pc_ptl/x86_64 image
++    // pre-install path (BMS EnforceCodeSignForAppWithPluginId) rejects any HAP that
++    // ships .so files, so the delivered HAP is built without the arm64 native libs.
++    // ArkTS call sites already degrade gracefully when the module cannot be loaded.
+     "arkOptions": {
+       "runtimeOnly": {
+         "packages": [
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/account/HuaweiLoginSheetContent.ets b/AiraBrowser/entry/src/main/ets/app/components/account/HuaweiLoginSheetContent.ets
+index 023ef7e..11848e2 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/account/HuaweiLoginSheetContent.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/account/HuaweiLoginSheetContent.ets
+@@ -1,4 +1,7 @@
+-import { LoginWithHuaweiIDButton, loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony: importing
++// `LoginWithHuaweiIDButton` statically makes the ArkCompiler runtime abort this
++// module link. Use the local drop-in shim and the ArkUI fallback button below.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import {
+   BROWSER_THEME_STORAGE_ACCENT_KEY,
+   BROWSER_THEME_STORAGE_FLOATING_SURFACE_KEY,
+@@ -60,18 +63,24 @@ export struct HuaweiLoginSheetContent {
+       }
+ 
+       Stack() {
+-        LoginWithHuaweiIDButton({
+-          params: {
+-            style: loginComponentManager.Style.BUTTON_RED,
+-            loginType: loginComponentManager.LoginType.ID,
+-            borderRadius: this.buttonHeight / 2,
+-            supportDarkMode: true,
+-            textAndIconStyle: true
+-          },
+-          controller: this.controller
+-        })
++        // [fix_aira_guide] The HMS `LoginWithHuaweiIDButton` ArkUI component only exists on
++        // HarmonyOS. On OpenHarmony this slot renders a plain ArkUI button that reports the
++        // "unsupported" failure through the shim controller, so the sign-in flow unwinds
++        // through its normal error path instead of being unavailable or crashing.
++        Button($r('app.string.settings_account_huawei'))
+           .width('100%')
+           .height(this.buttonHeight)
++          .type(ButtonType.Normal)
++          .fontSize(17)
++          .fontWeight(FontWeight.Medium)
++          .fontColor(Color.White)
++          .backgroundColor('#CF0A2C')
++          .borderRadius(this.buttonHeight / 2)
++          .enabled(this.agreementAccepted)
++          .opacity(this.agreementAccepted ? 1.0 : 0.5)
++          .onClick(() => {
++            this.controller.notifyUnavailable();
++          })
+ 
+         if (!this.agreementAccepted) {
+           Button('')
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserCrossDeviceTabsOverlay.ets b/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserCrossDeviceTabsOverlay.ets
+index 1dd0ec9..4ae6745 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserCrossDeviceTabsOverlay.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserCrossDeviceTabsOverlay.ets
+@@ -1,6 +1,8 @@
+ import { BusinessError } from '@kit.BasicServicesKit';
+ import { resolveAppResourceText } from '../../../core/resources/AppResourceText';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import router from '@ohos.router';
+ import { DEFAULT_THEME_PALETTE } from '../../../features/theme/palettes/DefaultThemePalette';
+ import { BrowserDataBoundaryInput } from '../../../common/models/BrowserModels';
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserLargeScreenAccountPopover.ets b/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserLargeScreenAccountPopover.ets
+index 778d98a..5f66e50 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserLargeScreenAccountPopover.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/browser/BrowserLargeScreenAccountPopover.ets
+@@ -1,4 +1,6 @@
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { showCenteredAlertDialog } from '../common/CenteredDialogSurface';
+ import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+ import {
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/membership/AiraProScreen.ets b/AiraBrowser/entry/src/main/ets/app/components/membership/AiraProScreen.ets
+index 5c5735f..22d6938 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/membership/AiraProScreen.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/membership/AiraProScreen.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import {
+   AiraProOverviewViewModel,
+   AiraProOverviewViewState
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsCenterScreen.ets b/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsCenterScreen.ets
+index 2d815dc..b09c148 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsCenterScreen.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/settings/SettingsCenterScreen.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { HuaweiLoginSheetContent } from '../account/HuaweiLoginSheetContent';
+ import { DesktopLoginConfirmSheetContent } from './DesktopLoginConfirmSheetContent';
+ import { AppProxyQuickSheetContent } from './AppProxyQuickSheetContent';
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkHost.ets b/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkHost.ets
+index 6630f7e..a1c797c 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkHost.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkHost.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { hilog } from '@kit.PerformanceAnalysisKit';
+ import {
+   BrowserQrScanCoordinator,
+diff --git a/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkSetupScreen.ets b/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkSetupScreen.ets
+index 45f9f2e..08f4935 100644
+--- a/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkSetupScreen.ets
++++ b/AiraBrowser/entry/src/main/ets/app/components/sync/CrossDeviceLinkSetupScreen.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import router from '@ohos.router';
+ import {
+   BrowserQrScanCoordinator,
+diff --git a/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets b/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
+index a980c0d..8dcaf1b 100644
+--- a/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
++++ b/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { webview } from '@kit.ArkWeb';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { BusinessError } from '@kit.BasicServicesKit';
+ import { AiraNavForensicsProbe } from '../../common/debug/AiraNavForensicsProbe';
+ import { curves, FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+diff --git a/AiraBrowser/entry/src/main/ets/app/pages/StartupWelcomeIntroPage.ets b/AiraBrowser/entry/src/main/ets/app/pages/StartupWelcomeIntroPage.ets
+index ef8c63a..00b8267 100644
+--- a/AiraBrowser/entry/src/main/ets/app/pages/StartupWelcomeIntroPage.ets
++++ b/AiraBrowser/entry/src/main/ets/app/pages/StartupWelcomeIntroPage.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { DEFAULT_THEME_PALETTE } from '../../features/theme/palettes/DefaultThemePalette';
+ import {
+   StartupWelcomeIntroActionState,
+diff --git a/AiraBrowser/entry/src/main/ets/app/pages/SyncWebdavConfigPage.ets b/AiraBrowser/entry/src/main/ets/app/pages/SyncWebdavConfigPage.ets
+index 4f54109..486d998 100644
+--- a/AiraBrowser/entry/src/main/ets/app/pages/SyncWebdavConfigPage.ets
++++ b/AiraBrowser/entry/src/main/ets/app/pages/SyncWebdavConfigPage.ets
+@@ -38,7 +38,9 @@ import {
+ } from '../../core/sync/SyncFailurePresentationService';
+ import { pasteboard } from '@kit.BasicServicesKit';
+ import { BusinessError } from '@kit.BasicServicesKit';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import {
+   sharedPreferencesRepository,
+   sharedSyncExperienceCoordinator
+diff --git a/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyLoginComponentShim.ets b/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyLoginComponentShim.ets
+new file mode 100644
+index 0000000..2a472b9
+--- /dev/null
++++ b/AiraBrowser/entry/src/main/ets/platform/huawei/OpenHarmonyLoginComponentShim.ets
+@@ -0,0 +1,161 @@
++/**
++ * [fix_aira_guide] OpenHarmony compatibility shim for the HMS-only
++ * `@hms:core.account.LoginComponent` module (`loginComponentManager` +
++ * `LoginWithHuaweiIDButton`).
++ *
++ * Why this file exists
++ * -------------------
++ * The upstream release HAP is compiled against the HarmonyOS SDK, where
++ * `@kit.AccountKit` also re-exports `loginComponentManager` and the
++ * `LoginWithHuaweiIDButton` ArkUI component. Neither of them exists on a plain
++ * OpenHarmony build (pc_ptl / x86_64). A *static* named import of a missing
++ * export is not a soft failure: when the page module is linked, the ArkCompiler
++ * runtime throws
++ *
++ *   SyntaxError: the requested module '@hms:core.account.LoginComponent'
++ *   does not provide an export name 'loginComponentManager'
++ *
++ * which aborts page construction. That is exactly what made the new-user
++ * onboarding dead-end on pc_ptl: finishing the intro routes to
++ * `app/pages/BrowserShellPage`, whose module link failed, the promise rejection
++ * was swallowed by `finishOnboardingToBrowser()` (`.catch(() => undefined)`),
++ * and the process was then killed by ArkUI with `reason=Js Error`.
++ *
++ * The fix mirrors the subset of the HMS API that the app actually uses, so the
++ * call sites stay source-compatible, while every operation degrades to a
++ * reported "unsupported" error instead of a module-link crash. HUAWEI ID sign-in
++ * is therefore simply unavailable on OpenHarmony; every other feature (browser,
++ * tabs, sync over WebDAV, ad blocking, downloads) is unaffected.
++ */
++import { BusinessError } from '@kit.BasicServicesKit';
++
++/** Error code reported when a HUAWEI ID operation is requested on a platform without the HMS module. */
++export const HUAWEI_LOGIN_UNSUPPORTED_CODE: number = 1001502009;
++
++export namespace loginComponentManager {
++  /** Mirrors the HMS `HuaweiIDCredential` shape; never produced by the shim. */
++  export interface HuaweiIDCredential {
++    readonly unionID: string;
++    readonly openID: string;
++    readonly authorizationCode: string;
++    readonly idToken?: string;
++  }
++
++  /** Mirrors HMS `AgreementStatus`; values kept identical so the shim is drop-in. */
++  export enum AgreementStatus {
++    NOT_ACCEPTED = 0,
++    ACCEPTED = 1
++  }
++
++  /** Mirrors HMS `Style`; only used to style the (unavailable) HUAWEI ID button. */
++  export enum Style {
++    BUTTON_RED = 0,
++    BUTTON_WHITE = 1,
++    BUTTON_WHITE_CIRCLE = 2,
++    BUTTON_RED_CIRCLE = 3,
++    BORDER_RED = 4,
++    BORDER_WHITE = 5,
++    WHITE_CIRCLE_BORDER = 6,
++    CUSTOM = 7
++  }
++
++  /** Mirrors HMS `LoginType`. */
++  export enum LoginType {
++    ID = 0,
++    PHONE = 1,
++    QUICK_LOGIN = 2
++  }
++
++  /** Mirrors HMS `ClickEvent`. */
++  export enum ClickEvent {
++    CLICK = 0,
++    CLICK_WITH_AGREEMENT = 1
++  }
++
++  function buildUnsupportedError(): BusinessError {
++    const error: BusinessError = {
++      code: HUAWEI_LOGIN_UNSUPPORTED_CODE,
++      message: 'HUAWEI ID sign-in is unavailable on this platform (OpenHarmony build without HMS AccountKit).',
++      name: 'BusinessError'
++    };
++    return error;
++  }
++
++  /**
++   * Drop-in replacement for `loginComponentManager.LoginWithHuaweiIDButtonController`.
++   * Every mutator returns `this` so existing fluent call sites keep working; the
++   * registered click callback is fired with an "unsupported" BusinessError when
++   * the fallback button built by `HuaweiLoginSheetContent` is pressed.
++   */
++  export class LoginWithHuaweiIDButtonController {
++    private loginCallback?: (error: BusinessError, response: HuaweiIDCredential) => void;
++    private clickEventCallback?: (error: BusinessError, response: ClickEvent) => void;
++    private agreementStatus: AgreementStatus = AgreementStatus.NOT_ACCEPTED;
++    private enabled: boolean = true;
++    private locale: string = '';
++
++    onClickLoginWithHuaweiIDButton(
++      callback: (error: BusinessError, response: HuaweiIDCredential) => void
++    ): LoginWithHuaweiIDButtonController {
++      this.loginCallback = callback;
++      return this;
++    }
++
++    onClickEvent(callback: (error: BusinessError, response: ClickEvent) => void): LoginWithHuaweiIDButtonController {
++      this.clickEventCallback = callback;
++      return this;
++    }
++
++    setAgreementStatus(agreementStatus: AgreementStatus): LoginWithHuaweiIDButtonController {
++      this.agreementStatus = agreementStatus;
++      return this;
++    }
++
++    setEnabled(enabled: boolean): LoginWithHuaweiIDButtonController {
++      this.enabled = enabled;
++      return this;
++    }
++
++    setLocale(locale: string): LoginWithHuaweiIDButtonController {
++      this.locale = locale;
++      return this;
++    }
++
++    getAgreementStatus(): AgreementStatus {
++      return this.agreementStatus;
++    }
++
++    getEnabled(): boolean {
++      return this.enabled;
++    }
++
++    getLocale(): string {
++      return this.locale;
++    }
++
++    /**
++     * [fix_aira_guide] Called by the ArkUI fallback button. Always reports the
++     * "unsupported" failure so the surrounding sign-in flow unwinds through its
++     * normal error path (toast + sheet close) instead of hanging.
++     */
++    notifyUnavailable(): void {
++      const error: BusinessError = buildUnsupportedError();
++      if (this.clickEventCallback !== undefined) {
++        this.clickEventCallback(error, ClickEvent.CLICK);
++      }
++      if (this.loginCallback !== undefined) {
++        this.loginCallback(error, {
++          unionID: '',
++          openID: '',
++          authorizationCode: ''
++        });
++      }
++    }
++  }
++}
++
++/**
++ * [fix_aira_guide] Always false on OpenHarmony: the HMS LoginComponent ArkUI
++ * component is not part of the platform, so no code path may render it.
++ */
++export const IS_HUAWEI_LOGIN_COMPONENT_AVAILABLE: boolean = false;
+\ No newline at end of file

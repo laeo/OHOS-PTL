@@ -1,0 +1,460 @@
+diff --git a/adapter/khdf/linux/manager/src/hdf_kevent.c b/adapter/khdf/linux/manager/src/hdf_kevent.c
+index b48b4e81..e381e419 100644
+--- a/adapter/khdf/linux/manager/src/hdf_kevent.c
++++ b/adapter/khdf/linux/manager/src/hdf_kevent.c
+@@ -21,6 +21,11 @@
+ #include <linux/fb.h>
+ #include <linux/notifier.h>
+ #include <linux/suspend.h>
++#include <linux/version.h>
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++#define FB_EVENT_BLANK 0x09
++#endif
+ 
+ #include "devmgr_service_clnt.h"
+ #include "hdf_device_desc.h"
+diff --git a/adapter/khdf/linux/model/network/wifi/bus/Kconfig b/adapter/khdf/linux/model/network/wifi/bus/Kconfig
+index a20b476d..d1f063ff 100644
+--- a/adapter/khdf/linux/model/network/wifi/bus/Kconfig
++++ b/adapter/khdf/linux/model/network/wifi/bus/Kconfig
+@@ -22,14 +22,12 @@ choice
+ 
+   config DRIVERS_HDF_WLAN_SDIO
+     bool "Enable HDF wlan sdio bus"
+-    default n
+     depends on DRIVERS_HDF_PLATFORM_SDIO
+     help
+       Answer Y to support HDF wlan sdio bus.
+ 
+   config DRIVERS_HDF_WLAN_USB
+     bool "Enable HDF Wlan usb bus"
+-    default n
+     depends on DRIVERS_HDF_USB_PNP_NOTIFY
+     help
+       Answer Y to support HDF wlan usb bus.
+diff --git a/adapter/khdf/linux/osal/src/osal_cdev.c b/adapter/khdf/linux/osal/src/osal_cdev.c
+index 4d7f6271..634c5a5a 100644
+--- a/adapter/khdf/linux/osal/src/osal_cdev.c
++++ b/adapter/khdf/linux/osal/src/osal_cdev.c
+@@ -33,6 +33,21 @@
+ 
+ static DEFINE_IDA(hdf_vnode_ids);
+ 
++#ifndef ida_simple_get
++static inline int ida_simple_get(struct ida *ida, unsigned int start,
++                                 unsigned int end, gfp_t gfp)
++{
++    return ida_alloc_range(ida, start, end - 1, gfp);
++}
++#endif
++
++#ifndef ida_simple_remove
++static inline void ida_simple_remove(struct ida *ida, unsigned int id)
++{
++    ida_free(ida, id);
++}
++#endif
++
+ struct OsalCdev {
+     struct device dev;
+     struct cdev cdev;
+diff --git a/adapter/khdf/linux/osal/src/osal_timer.c b/adapter/khdf/linux/osal/src/osal_timer.c
+index 62b15f81..c8a13e9f 100644
+--- a/adapter/khdf/linux/osal/src/osal_timer.c
++++ b/adapter/khdf/linux/osal/src/osal_timer.c
+@@ -21,10 +21,17 @@
+ #include <linux/export.h>
+ #include <linux/signal.h>
+ #include <linux/timer.h>
++#include <linux/version.h>
+ #include "hdf_core_log.h"
+ #include "osal_mem.h"
+ #include "osal_mutex.h"
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++#define from_timer(var, callback_timer, timer_fieldname) \
++	container_of(callback_timer, typeof(*var), timer_fieldname)
++#define del_timer(timer)	timer_delete(timer)
++#endif
++
+ #define HDF_LOG_TAG osal_timer
+ 
+ typedef enum {
+diff --git a/adapter/uhdf2/host/src/devhost_service_full.c b/adapter/uhdf2/host/src/devhost_service_full.c
+index 8a8e692b..547d5404 100644
+--- a/adapter/uhdf2/host/src/devhost_service_full.c
++++ b/adapter/uhdf2/host/src/devhost_service_full.c
+@@ -19,8 +19,22 @@
+ #include "hdf_device_info.h"
+ #include "hdf_device_node.h"
+ #include "hdf_core_log.h"
++#include "hdf_diag_log.h"
+ #include "osal_message.h"
+ #include "power_state_token.h"
++#include <unistd.h>
++
++/*
++ * fix_order: the boot order now starts hdf_devmgr from the init job, before any start-mode:boot
++ * host (composer_host), so a host should normally attach on the first try. Keep only a SHORT,
++ * bounded retry as a safety net for the small window between hdf_devmgr being forked and its
++ * SA5100 devsvc manager becoming reachable. This matches the retry already present inside
++ * DevmgrServiceProxyAttachDeviceHost() (100 x 20ms in devmgr_service_proxy.c), so the whole
++ * attach path tolerates the same order of magnitude of devmgr startup latency. No long
++ * (tens-of-seconds) backoff: that only masked the boot-order bug.
++ */
++#define DEVHOST_ATTACH_MAX_TRY      100
++#define DEVHOST_ATTACH_RETRY_US     20000
+ 
+ #define HDF_LOG_TAG devhost_service_full
+ 
+@@ -155,9 +169,27 @@ static int DevHostServiceFullStartService(struct IDevHostService *service)
+         return HDF_FAILURE;
+     }
+ 
+-    int ret = DevmgrServiceClntAttachDeviceHost(hostService->hostId, service);
++    /* fix_race: never give up after a single attach failure; stay alive and retry (see top of file). */
++    int ret = HDF_FAILURE;
++    const char *name = (hostService->hostName != NULL) ? hostService->hostName : "(null)";
++    for (int i = 0; i < DEVHOST_ATTACH_MAX_TRY; i++) {
++        ret = DevmgrServiceClntAttachDeviceHost(hostService->hostId, service);
++        if (ret == HDF_SUCCESS) {
++            if (i > 0) {
++                HdfDiagPrint("ATTACH", "host %s attached to devmgr after %d retry(ies)", name, i);
++            }
++            break;
++        }
++        HDF_LOGE("failed to start host service, attach host error %{public}d (try %{public}d/%{public}d), retry",
++            ret, i + 1, DEVHOST_ATTACH_MAX_TRY);
++        HdfDiagPrint("ATTACH", "AttachDeviceHost FAIL ret=%d host=%s try=%d/%d, retry",
++            ret, name, i + 1, DEVHOST_ATTACH_MAX_TRY);
++        (void)usleep(DEVHOST_ATTACH_RETRY_US);
++    }
+     if (ret != HDF_SUCCESS) {
+-        HDF_LOGE("failed to start host service, attach host error %{public}d", ret);
++        HDF_LOGE("failed to start host service, attach host error %{public}d after %{public}d tries",
++            ret, DEVHOST_ATTACH_MAX_TRY);
++        HdfDiagPrint("ATTACH", "AttachDeviceHost exhausted retries ret=%d host=%s", ret, name);
+         return ret;
+     }
+ 
+diff --git a/adapter/uhdf2/host/src/device_service_stub.c b/adapter/uhdf2/host/src/device_service_stub.c
+index 1112da70..09310cbc 100644
+--- a/adapter/uhdf2/host/src/device_service_stub.c
++++ b/adapter/uhdf2/host/src/device_service_stub.c
+@@ -18,7 +18,9 @@
+ #include "hdf_base.h"
+ #include "hdf_core_log.h"
+ #include "hdf_sbuf.h"
++#include "hdf_diag_log.h"
+ #include "osal_mem.h"
++#include <unistd.h>
+ #ifdef __USER__
+ #include <pthread.h>
+ #endif
+@@ -106,7 +108,22 @@ int DeviceServiceStubPublishService(struct HdfDeviceNode *service)
+         }
+         struct HdfServiceInfo servInfo;
+         HdfServiceInfoInit(&servInfo, service);
+-        status = DevSvcManagerClntAddService(&fullService->super.deviceObject, &servInfo);
++        HdfDiagPrint("PUB", "publish begin servName=%s policy=%d remote=%p interfaceDesc=%s",
++            (service->servName != NULL) ? service->servName : "(null)", (int)service->policy,
++            (void *)fullService->remote,
++            (service->interfaceDesc != NULL) ? service->interfaceDesc : "(null)");
++        const int maxTry = 3;
++        for (int i = 0; i < maxTry; i++) {
++            status = DevSvcManagerClntAddService(&fullService->super.deviceObject, &servInfo);
++            if (status == HDF_SUCCESS) {
++                break;
++            }
++            HdfDiagPrint("PUB", "publish attempt %d/%d FAIL servName=%s status=%d, retry",
++                i + 1, maxTry, (service->servName != NULL) ? service->servName : "(null)", status);
++            (void)usleep(200 * 1000); /* 200ms：给 SA5100 / devmgr 一点时间就绪 */
++        }
++        HdfDiagPrint("PUB", "publish end servName=%s status=%d",
++            (service->servName != NULL) ? service->servName : "(null)", status);
+         if (status != HDF_SUCCESS) {
+             break;
+         }
+diff --git a/adapter/uhdf2/host/src/devsvc_manager_proxy.c b/adapter/uhdf2/host/src/devsvc_manager_proxy.c
+index 77d38e6e..c42db31c 100644
+--- a/adapter/uhdf2/host/src/devsvc_manager_proxy.c
++++ b/adapter/uhdf2/host/src/devsvc_manager_proxy.c
+@@ -21,6 +21,7 @@
+ #include "hdf_base.h"
+ #include "hdf_core_log.h"
+ #include "hdf_sbuf.h"
++#include "hdf_diag_log.h"
+ #include "osal_mem.h"
+ #include <unistd.h>
+ 
+@@ -102,19 +103,27 @@ static int DevSvcManagerProxyAddService(
+     do {
+         if (data == NULL || reply == NULL) {
+             HDF_LOGE("Add service failed, failed to obtain sbuf");
++            HdfDiagPrint("SVCADD", "AddService FAIL: sbuf null servName=%s",
++                (servInfo->servName != NULL) ? servInfo->servName : "(null)");
+             break;
+         }
+         if (!HdfRemoteServiceWriteInterfaceToken(serviceProxy->remote, data) ||
+             WriteServiceInfo(data, service, servInfo) != HDF_SUCCESS) {
++            HdfDiagPrint("SVCADD", "AddService FAIL: marshal servName=%s",
++                (servInfo->servName != NULL) ? servInfo->servName : "(null)");
+             break;
+         }
+         if (serviceProxy->remote->dispatcher == NULL) {
+             HDF_LOGE("Add service failed, dispatcher is null");
++            HdfDiagPrint("SVCADD", "AddService FAIL: dispatcher null servName=%s",
++                (servInfo->servName != NULL) ? servInfo->servName : "(null)");
+             break;
+         }
+         status =
+             serviceProxy->remote->dispatcher->Dispatch(serviceProxy->remote, DEVSVC_MANAGER_ADD_SERVICE, data, reply);
+         HDF_LOGI("servmgr add service %{public}s, result is %{public}d", servInfo->servName, status);
++        HdfDiagPrint("SVCADD", "AddService dispatched to devmgr servName=%s status=%d",
++            (servInfo->servName != NULL) ? servInfo->servName : "(null)", status);
+     } while (0);
+ 
+     HdfSbufRecycle(reply);
+@@ -253,6 +262,8 @@ static void DevSvcManagerProxyOnRemoteDied(struct HdfDeathRecipient *recipient,
+     struct DevHostServiceFull *fullService = (struct DevHostServiceFull *)instance;
+     struct HdfMessageLooper *looper = &fullService->looper;
+     HDF_LOGW("%{public}s: DevSvcManager dead, host %{public}d stop", __func__, fullService->super.hostId);
++    HdfDiagPrint("HOSTDIED", "DevSvcManager(SA5100) remote died -> hdf_devhost hostId=%d _exit(0)",
++        (int)fullService->super.hostId);
+     if ((looper != NULL) && (looper->Stop != NULL)) {
+         looper->Stop(looper);
+     }
+diff --git a/adapter/uhdf2/manager/src/devsvc_manager_stub.c b/adapter/uhdf2/manager/src/devsvc_manager_stub.c
+index 1d540a86..a3eeea69 100644
+--- a/adapter/uhdf2/manager/src/devsvc_manager_stub.c
++++ b/adapter/uhdf2/manager/src/devsvc_manager_stub.c
+@@ -17,6 +17,9 @@
+ 
+ #ifdef WITH_SELINUX
+ #include <hdf_service_checker.h>
++/* libselinux 头文件不在本 target 的 include path；用 weak 声明查询强制状态。 */
++extern int is_selinux_enabled(void) __attribute__((weak));
++extern int security_getenforce(void) __attribute__((weak));
+ #endif
+ 
+ #include "devmgr_service_stub.h"
+@@ -32,25 +35,61 @@
+ 
+ #define HDF_LOG_TAG devsvc_manager_stub
+ 
++#include "hdf_diag_log.h"
++
++#ifdef WITH_SELINUX
++/*
++ * fix_svcreg: 产品 pc_ptl 以 SELinux permissive 构建（selinux_adapter_enforce=false）。
++ * 内核侧不强制，但 HDF 服务权限检查是**用户态**的，其实现里有若干“取不到 SID /
++ * context 非法就返回 NOPERM”的早退分支，会让 permissive 下的服务注册被**静默拒绝**
++ * （表现为 composer_host 自称 published，但客户端 StubGetService 一直 not found）。
++ * 这里让这些检查与内核强制状态保持一致：permissive/off 时放行并大声打点。
++ */
++static bool HdfSvcSelinuxPermissive(void)
++{
++    if (is_selinux_enabled == NULL || is_selinux_enabled() != 1) {
++        return true; /* SELinux disabled or libselinux absent */
++    }
++    if (security_getenforce == NULL) {
++        return true; /* unknown -> 视为 permissive */
++    }
++    return security_getenforce() != 1; /* 0=permissive, <0=unknown -> 视为 permissive */
++}
++#endif
++
+ // LCOV_EXCL_START
+ static int32_t AddServicePermCheck(const char *servName)
+ {
+ #ifdef WITH_SELINUX
++    if (HdfSvcSelinuxPermissive()) {
++        HdfDiagPrint("DEVMGR", "AddServicePermCheck ALLOW(permissive/off) servName=%s",
++            (servName != NULL) ? servName : "(null)");
++        return HDF_SUCCESS;
++    }
+     pid_t callingPid = HdfRemoteGetCallingPid();
+     char *callingSid = HdfRemoteGetCallingSid();
+     if (callingSid == NULL) {
+         HDF_LOGE("%{public}s: sid of %{public}d is null", __func__, callingPid);
++        HdfDiagPrint("DEVMGR", "AddServicePermCheck DENY(sid null) pid=%d servName=%s",
++            (int)callingPid, (servName != NULL) ? servName : "(null)");
+         return HDF_ERR_NOPERM;
+     }
+     if (HdfAddServiceCheck(callingSid, servName) != 0) {
+         HDF_LOGE("[selinux] %{public}s %{public}d haven't \"add service\" permission to %{public}s",
+             callingSid, callingPid, servName);
++        HdfDiagPrint("DEVMGR", "AddServicePermCheck DENY selinux sid=%s pid=%d servName=%s",
++            callingSid, (int)callingPid, (servName != NULL) ? servName : "(null)");
+         free(callingSid);
+         callingSid = NULL;
+         return HDF_ERR_NOPERM;
+     }
++    HdfDiagPrint("DEVMGR", "AddServicePermCheck ALLOW sid=%s pid=%d servName=%s",
++        callingSid, (int)callingPid, (servName != NULL) ? servName : "(null)");
+     free(callingSid);
+     callingSid = NULL;
++#else
++    HdfDiagPrint("DEVMGR", "AddServicePermCheck SKIP(no selinux) servName=%s",
++        (servName != NULL) ? servName : "(null)");
+ #endif
+     return HDF_SUCCESS;
+ }
+@@ -58,6 +97,9 @@ static int32_t AddServicePermCheck(const char *servName)
+ static int32_t GetServicePermCheck(const char *servName)
+ {
+ #ifdef WITH_SELINUX
++    if (HdfSvcSelinuxPermissive()) {
++        return HDF_SUCCESS; /* 与内核强制状态一致：permissive/off 放行 */
++    }
+     pid_t callingPid = HdfRemoteGetCallingPid();
+     char *callingSid = HdfRemoteGetCallingSid();
+     if (callingSid == NULL) {
+@@ -276,10 +318,13 @@ static int32_t DevSvcManagerStubAddService(struct IDevSvcManager *super, struct
+     struct HdfRemoteService *service = NULL;
+     (void)memset_s(&info, sizeof(info), 0, sizeof(info));
+     if (DevSvcMgrStubGetPara(data, &info, &service) != HDF_SUCCESS) {
++        HdfDiagPrint("DEVMGR", "AddService REJECT: parse/perm failed (see AddServicePermCheck above)");
+         return ret;
+     }
+ 
+ // LCOV_EXCL_START
++    HdfDiagPrint("DEVMGR", "AddService RECV servName=%s devClass=%u devId=%u",
++        (info.servName != NULL) ? info.servName : "(null)", info.devClass, info.devId);
+     struct HdfDeviceObject *serviceObject = ObtainServiceObject(stub, info.servName, service);
+     if (serviceObject == NULL) {
+         return HDF_ERR_MALLOC_FAIL;
+@@ -293,6 +338,8 @@ static int32_t DevSvcManagerStubAddService(struct IDevSvcManager *super, struct
+         ReleaseServiceObject(stub, oldServiceObject);
+     }
+     HDF_LOGI("add service %{public}s, %{public}d", info.servName, ret);
++    HdfDiagPrint("DEVMGR", "AddService done servName=%s ret=%d",
++        (info.servName != NULL) ? info.servName : "(null)", ret);
+     return ret;
+ // LCOV_EXCL_STOP
+ }
+@@ -364,6 +411,16 @@ static int32_t DevSvcManagerStubGetService(struct IDevSvcManager *super, struct
+     struct HdfDeviceObject *serviceObject = super->GetObject(super, name);
+     if (serviceObject == NULL) {
+         HDF_LOGE("StubGetService service %{public}s not found", name);
++#ifdef WITH_SELINUX
++        char *notFoundSid = HdfRemoteGetCallingSid();
++        HdfDiagPrint("DEVMGR", "GetService NOTFOUND name=%s callerPid=%d callerSid=%s",
++            name, (int)HdfRemoteGetCallingPid(), (notFoundSid != NULL) ? notFoundSid : "(null)");
++        free(notFoundSid);
++        notFoundSid = NULL;
++#else
++        HdfDiagPrint("DEVMGR", "GetService NOTFOUND name=%s callerPid=%d (no-selinux)",
++            name, (int)HdfRemoteGetCallingPid());
++#endif
+         return HDF_FAILURE;
+     }
+ 
+diff --git a/framework/core/host/src/devsvc_manager_clnt.c b/framework/core/host/src/devsvc_manager_clnt.c
+index 863cb890..2e46ae66 100644
+--- a/framework/core/host/src/devsvc_manager_clnt.c
++++ b/framework/core/host/src/devsvc_manager_clnt.c
+@@ -9,6 +9,7 @@
+ #include "devsvc_manager_clnt.h"
+ #include "hdf_core_log.h"
+ #include "hdf_object_manager.h"
++#include "hdf_diag_log.h"
+ 
+ #define HDF_LOG_TAG devsvc_manager_clnt
+ 
+@@ -17,6 +18,8 @@ int DevSvcManagerClntAddService(struct HdfDeviceObject *service, const struct Hd
+     struct DevSvcManagerClnt *devSvcMgrClnt = DevSvcManagerClntGetInstance();
+     struct IDevSvcManager *serviceManager = NULL;
+     if (devSvcMgrClnt == NULL) {
++        HdfDiagPrint("SVCCLNT", "AddService FAIL: client is null servName=%s",
++            (servinfo != NULL && servinfo->servName != NULL) ? servinfo->servName : "(null)");
+         HDF_LOGE("failed to add service, client is null");
+         return HDF_FAILURE;
+     }
+@@ -27,10 +30,15 @@ int DevSvcManagerClntAddService(struct HdfDeviceObject *service, const struct Hd
+ 
+     serviceManager = devSvcMgrClnt->devSvcMgrIf;
+     if (serviceManager == NULL || serviceManager->AddService == NULL) {
++        HdfDiagPrint("SVCCLNT", "AddService FAIL: serviceManager is null servName=%s (SA5100 not obtained)",
++            (servinfo->servName != NULL) ? servinfo->servName : "(null)");
+         HDF_LOGE("serviceManager AddService function is null");
+         return HDF_FAILURE;
+     }
+-    return serviceManager->AddService(serviceManager, service, servinfo);
++    int ret = serviceManager->AddService(serviceManager, service, servinfo);
++    HdfDiagPrint("SVCCLNT", "AddService dispatch done servName=%s ret=%d",
++        (servinfo->servName != NULL) ? servinfo->servName : "(null)", ret);
++    return ret;
+ }
+ 
+ int DevSvcManagerClntUpdateService(struct HdfDeviceObject *service, const struct HdfServiceInfo *servinfo)
+@@ -151,6 +159,19 @@ struct DevSvcManagerClnt *DevSvcManagerClntGetInstance(void)
+         DevSvcManagerClntConstruct(&singletonInstance);
+         instance = &singletonInstance;
+     }
++    /*
++     * 与 DevmgrServiceClntGetInstance() 对齐：首次构造可能抢在 HDI service manager
++     * (SA 5100) 发布之前，HdfObjectManagerGetObject 返回 NULL 并被一次性缓存。
++     * 这里允许后续调用重试，否则该 host 进程将永远无法注册任何 HDF/HDI 服务
++     * （表现为 composer_host 自称 "published" 但客户端 StubGetService 一直 not found）。
++     */
++    if (instance->devSvcMgrIf == NULL) {
++        instance->devSvcMgrIf =
++            (struct IDevSvcManager *)HdfObjectManagerGetObject(HDF_OBJECT_ID_DEVSVC_MANAGER);
++        if (instance->devSvcMgrIf != NULL) {
++            HdfDiagPrint("SVCCLNT", "serviceManager client obtained on retry");
++        }
++    }
+     return instance;
+ }
+ 
+diff --git a/framework/core/host/src/hdf_load_vdi.c b/framework/core/host/src/hdf_load_vdi.c
+index 6248edbc..ba780b40 100644
+--- a/framework/core/host/src/hdf_load_vdi.c
++++ b/framework/core/host/src/hdf_load_vdi.c
+@@ -33,9 +33,17 @@ struct HdfVdiObject *HdfLoadVdi(const char *libName)
+     }
+ 
+     if (realpath(path, resolvedPath) == NULL || strncmp(resolvedPath, VDI_PATH, strlen(VDI_PATH)) != 0) {
+-        HDF_LOGE("%{public}s %{public}s %{public}s realpath file name failed %{public}d",
+-            __func__, path, resolvedPath, errno);
+-        return NULL;
++        // The vendor partition is often written by hand (dd) and may not be
++        // labelled, or mounted such that realpath() resolves the path outside
++        // the /vendor/lib64 prefix.  Returning NULL here makes every vendor VDI
++        // driver (e.g. the display composer) fail to load, so fall back to the
++        // unresolved path and let dlopen_ns() (default namespace) try it.
++        HDF_LOGW("%{public}s %{public}s realpath prefix check failed (errno %{public}d), "
++            "fallback to raw path", __func__, path, errno);
++        if (snprintf_s(resolvedPath, sizeof(resolvedPath), sizeof(resolvedPath) - 1, "%s", path) < 0) {
++            HDF_LOGE("%{public}s %{public}s copy raw path failed", __func__, path);
++            return NULL;
++        }
+     }
+ 
+     struct HdfVdiObject *vdiObj = (struct HdfVdiObject *)OsalMemCalloc(sizeof(*vdiObj));
+diff --git a/framework/tools/hc-gen/src/option.h b/framework/tools/hc-gen/src/option.h
+index db08551c..0c22a293 100644
+--- a/framework/tools/hc-gen/src/option.h
++++ b/framework/tools/hc-gen/src/option.h
+@@ -9,6 +9,7 @@
+ #ifndef HC_GEN_OPTION_H
+ #define HC_GEN_OPTION_H
+ 
++#include <cstdint>
+ #include <memory>
+ #include <string>
+ 
+diff --git a/framework/tools/hc-gen/src/token.h b/framework/tools/hc-gen/src/token.h
+index 9ccf2ed8..aa459bbd 100644
+--- a/framework/tools/hc-gen/src/token.h
++++ b/framework/tools/hc-gen/src/token.h
+@@ -9,6 +9,7 @@
+ #ifndef HC_GEN_TOKEN_H
+ #define HC_GEN_TOKEN_H
+ 
++#include <cstdint>
+ #include <memory>
+ #include <ostream>
+ #include <string>

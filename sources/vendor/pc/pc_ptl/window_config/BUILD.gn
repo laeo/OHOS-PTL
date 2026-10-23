@@ -1,0 +1,33 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+# Real-hardware DPI override for the Panther Lake panel (3072x1920, 350x220 mm
+# -> ~223 PPI).  Installed into /sys_prod/etc/window/resources/, which
+# GetOneCfgFile() prefers over the /system default from vendor/ohemu/virt.
+# Only display_manager_config is overridden here; the shared
+# window_manager_config.xml from vendor/ohemu/virt stays in use.
+ohos_prebuilt_etc("display_manager_config") {
+  source = "display_manager_config.xml"
+  install_images = [ sys_prod_base_dir ]
+  relative_install_dir = "window/resources"
+  subsystem_name = "product_pc_ptl"
+  part_name = "product_pc_ptl"
+}
+
+group("window_config") {
+  deps = [
+    ":display_manager_config",
+  ]
+}

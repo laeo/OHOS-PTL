@@ -1,0 +1,32 @@
+{
+  "name": "@ohos/pc_ptl_product",
+  "description": "product part definition for Intel Panther Lake (X7-358H) real hardware",
+  "version": "4.0",
+  "license": "Apache License 2.0",
+  "publishAs": "code-segment",
+  "segment": {
+    "destPath": "vendor/pc/pc_ptl"
+  },
+  "dirs": {},
+  "scripts": {},
+  "component": {
+    "name": "product_pc_ptl",
+    "subsystem": "product_pc_ptl",
+    "features": [],
+    "adapted_system_type": [
+      "standard"
+    ],
+    "rom": "",
+    "ram": "",
+    "deps": {
+      "components": [],
+      "third_party": []
+    },
+    "build": {
+      "sub_component": [
+        "//vendor/pc/pc_ptl/power_config:power_mode_config",
+        "//vendor/pc/pc_ptl/window_config:window_config"
+      ]
+    }
+  }
+}

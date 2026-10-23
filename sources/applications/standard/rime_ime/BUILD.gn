@@ -1,0 +1,42 @@
+# Copyright (c) 2026 OpenHarmony PC Image Contributors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+_rime_subsystem = "applications"
+_rime_part = "pc_rime_ime"
+_rime_images = [ system_base_dir ]
+
+# Rime configuration consumed by the input-method extension at runtime.
+ohos_prebuilt_etc("rime_default_yaml") {
+  source = "etc/rime/default.yaml"
+  subsystem_name = _rime_subsystem
+  part_name = _rime_part
+  install_images = _rime_images
+  module_install_dir = "etc/rime"
+}
+
+ohos_prebuilt_etc("rime_ice_ohos_schema_yaml") {
+  source = "etc/rime/rime_ice_ohos.schema.yaml"
+  subsystem_name = _rime_subsystem
+  part_name = _rime_part
+  install_images = _rime_images
+  module_install_dir = "etc/rime"
+}
+
+group("pc_rime_ime") {
+  deps = [
+    ":rime_default_yaml",
+    ":rime_ice_ohos_schema_yaml",
+  ]
+}

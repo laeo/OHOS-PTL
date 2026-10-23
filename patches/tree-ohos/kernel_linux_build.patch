@@ -1,0 +1,125 @@
+diff --git a/kernel.mk b/kernel.mk
+index d145e7f..9bf9218 100644
+--- a/kernel.mk
++++ b/kernel.mk
+@@ -18,6 +18,11 @@ PRODUCT_NAME=$(TARGET_PRODUCT)
+ OHOS_BUILD_HOME := $(realpath $(shell pwd)/../../../)
+ KERNEL_SRC_TMP_PATH := $(OUT_DIR)/kernel/${KERNEL_VERSION}
+ KERNEL_OBJ_TMP_PATH := $(OUT_DIR)/kernel/OBJ/${KERNEL_VERSION}
++
++# Parallel jobs for the kernel build. Kernel object files are large, so this
++# must stay bounded on memory-constrained hosts; a too-high value can trigger
++# a system-wide OOM. Override with KERNEL_JOBS=<n>.
++KERNEL_JOBS ?= 8
+ ifeq ($(BUILD_TYPE), standard)
+     BOOT_IMAGE_PATH = $(OHOS_BUILD_HOME)/device/board/hisilicon/hispark_taurus/uboot/prebuilts
+     KERNEL_SRC_TMP_PATH := $(OUT_DIR)/kernel/src_tmp/${KERNEL_VERSION}
+@@ -28,10 +33,14 @@ KERNEL_SRC_PATH := $(OHOS_BUILD_HOME)/kernel/linux/${KERNEL_VERSION}
+ KERNEL_PATCH_PATH := $(OHOS_BUILD_HOME)/kernel/linux/patches/${KERNEL_VERSION}
+ KERNEL_CONFIG_PATH := $(OHOS_BUILD_HOME)/kernel/linux/config/${KERNEL_VERSION}
+ PREBUILTS_GCC_DIR := $(OHOS_BUILD_HOME)/prebuilts/gcc
+-CLANG_HOST_TOOLCHAIN := $(OHOS_BUILD_HOME)/prebuilts/clang/ohos/linux-x86_64/llvm/bin
++CLANG_HOST_TOOLCHAIN ?= $(OHOS_BUILD_HOME)/prebuilts/clang/ohos/linux-x86_64/llvm/bin
+ KERNEL_HOSTCC := $(CLANG_HOST_TOOLCHAIN)/clang
+ KERNEL_PREBUILT_MAKE := make
+ CLANG_CC := $(CLANG_HOST_TOOLCHAIN)/clang
++# Per-device manifest of module roots to build and stage (see the module flow
++# below / ohos_stage_modules.sh).  If no manifest exists for the board, only
++# bzImage is built (legacy behaviour, e.g. the QEMU products).
++KERNEL_MODULES_MANIFEST ?= $(OHOS_BUILD_HOME)/kernel/linux/build/modules_manifests/$(DEVICE_NAME).manifest
+ 
+ KERNEL_CROSS_COMPILE :=
+ ifeq ($(KERNEL_ARCH), arm)
+@@ -126,6 +135,9 @@ endif
+ ifeq ($(UNIFIED_COLLECTION_PATCH_FILE), $(wildcard $(UNIFIED_COLLECTION_PATCH_FILE)))
+ 	$(hide) $(UNIFIED_COLLECTION_PATCH_FILE) $(OHOS_BUILD_HOME) $(KERNEL_SRC_TMP_PATH) $(DEVICE_NAME) $(KERNEL_VERSION)
+ endif
++ifneq ($(filter linux-6.18 linux-7.2,$(KERNEL_VERSION)),)
++	$(hide) $(OHOS_BUILD_HOME)/kernel/linux/common_modules/apply_ohos_modules.sh $(OHOS_BUILD_HOME) $(KERNEL_SRC_TMP_PATH) $(KERNEL_VERSION)
++endif
+ ifeq ($(KERNEL_VERSION), linux-6.6)
+ ifeq ($(CED_PATCH_FILE), $(wildcard $(CED_PATCH_FILE)))
+ 	$(hide) bash $(CED_PATCH_FILE) $(OHOS_BUILD_HOME) $(KERNEL_SRC_TMP_PATH) $(DEVICE_NAME) $(KERNEL_VERSION)
+@@ -160,12 +172,35 @@ ifeq ($(KVM_FIX_PATCH_FILE), $(wildcard $(KVM_FIX_PATCH_FILE)))
+ endif
+ endif
+ 	$(hide) cp -rf $(KERNEL_CONFIG_PATH)/. $(KERNEL_SRC_TMP_PATH)/
+-	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) distclean
++	# NOTE: -I$(KERNEL_SRC_TMP_PATH) is required because some in-tree makefiles
++	# (e.g. drivers/hdf_core/adapter/khdf/.../Makefile) use bare relative
++	# `include drivers/hdf/...` paths. When KBUILD_OUTPUT/O= is set, kbuild
++	# re-execs make with CWD in the object dir, so those includes are not found
++	# during the recursive clean walk and distclean fails. Adding the source
++	# tree to make's include search path resolves them without changing any
++	# product behaviour (the object dir is still searched first).
++	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) -I$(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) distclean
+ 	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(DEFCONFIG_FILE)
+ ifeq ($(KERNEL_VERSION), linux-5.10)
+ 	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) modules_prepare
+ endif
+-	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) -j64 $(KERNEL_IMAGE)
++	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) -j$(KERNEL_JOBS) $(KERNEL_IMAGE)
++# ---- kernel modules: build + stage the board's curated closure --------------
++# Historically this target only ran `make bzImage`, so every CONFIG_=m driver
++# was silently dropped (never built, never shipped).  For boards that opt in
++# with a per-device manifest (kernel/linux/build/modules_manifests/<dev>.manifest)
++# we now run a *top-level* `make modules` (necessary so modpost uses vmlinux.o
++# and a valid Module.symvers is produced; sub-dir/M= builds fail without it) and
++# then stage the dependency closure of the manifest roots next to the kernel
++# objects, where make_partition_disk.sh picks it up.  Products without a
++# manifest are unaffected (still bzImage only).
++ifeq ($(KERNEL_ARCH),x86_64)
++ifneq ($(wildcard $(KERNEL_MODULES_MANIFEST)),)
++	$(hide) echo "build kernel modules (manifest: $(KERNEL_MODULES_MANIFEST))..."
++	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) -j$(KERNEL_JOBS) modules
++	$(hide) $(OHOS_BUILD_HOME)/kernel/linux/build/ohos_stage_modules.sh $(KERNEL_OBJ_TMP_PATH) $(KERNEL_OBJ_TMP_PATH)/modules_stage $(KERNEL_MODULES_MANIFEST)
++endif
++endif
+ endif
+ ifeq ($(DEVICE_NAME), hispark_phoenix)
+ 	$(hide) $(KERNEL_MAKE) -C $(KERNEL_SRC_TMP_PATH) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) dtbs
+diff --git a/kernel_module_build.sh b/kernel_module_build.sh
+index 91c5693..22e9f9c 100755
+--- a/kernel_module_build.sh
++++ b/kernel_module_build.sh
+@@ -55,6 +55,40 @@ if [ "$DEVICE_NAME" == "hispark_phoenix"  ];then
+ export SDK_SOURCE_DIR=${OHOS_ROOT_PATH}/device/soc/hisilicon/hi3751v350/sdk_linux/source
+ fi
+ 
++# Newer kernels (e.g. linux-7.2) require Clang >= 17.0.1, but the bundled OHOS
++# prebuilt clang may be older (15.0.4). The native x86_64 kernel is built with
++# the host toolchain, so automatically fall back to a host clang that satisfies
++# the kernel source's own minimum (kernel/linux/<ver>/scripts/min-tool-version.sh).
++# An explicit CLANG_HOST_TOOLCHAIN (environment) always wins; other arches keep
++# the prebuilt behaviour unchanged.
++if [ "$KERNEL_ARCH" == "x86_64" ] && [ -z "$CLANG_HOST_TOOLCHAIN" ]; then
++    PREBUILT_CLANG_DIR=${OHOS_ROOT_PATH}/prebuilts/clang/ohos/linux-x86_64/llvm/bin
++    MIN_CLANG_MAJOR=0
++    MIN_TOOL_SCRIPT=${OHOS_ROOT_PATH}/kernel/linux/${KERNEL_VERSION}/scripts/min-tool-version.sh
++    if [ -f "$MIN_TOOL_SCRIPT" ]; then
++        MIN_CLANG_VERSION=$(sh "$MIN_TOOL_SCRIPT" llvm 2>/dev/null || echo 0)
++        MIN_CLANG_MAJOR=$(echo "$MIN_CLANG_VERSION" | cut -d. -f1)
++    fi
++    if [ -x "$PREBUILT_CLANG_DIR/clang" ]; then
++        PREBUILT_CLANG_MAJOR=$("$PREBUILT_CLANG_DIR/clang" -dumpversion 2>/dev/null | cut -d. -f1)
++    else
++        PREBUILT_CLANG_MAJOR=0
++    fi
++    if [ "${PREBUILT_CLANG_MAJOR:-0}" -ge "${MIN_CLANG_MAJOR:-0}" ] 2>/dev/null; then
++        export CLANG_HOST_TOOLCHAIN=$PREBUILT_CLANG_DIR
++    else
++        for CANDIDATE in "$(command -v clang 2>/dev/null || true)" /usr/lib/llvm-21/bin/clang; do
++            [ -n "$CANDIDATE" ] && [ -x "$CANDIDATE" ] || continue
++            CANDIDATE_MAJOR=$("$CANDIDATE" -dumpversion 2>/dev/null | cut -d. -f1)
++            if [ "${CANDIDATE_MAJOR:-0}" -ge "${MIN_CLANG_MAJOR:-0}" ] 2>/dev/null; then
++                export CLANG_HOST_TOOLCHAIN=$(dirname "$CANDIDATE")
++                echo "kernel: prebuilt clang ${PREBUILT_CLANG_MAJOR} < required ${MIN_CLANG_MAJOR}; using host clang at ${CLANG_HOST_TOOLCHAIN}" >&2
++                break
++            fi
++        done
++    fi
++fi
++
+ make -f kernel.mk
+ 
+ if [ -f "${LINUX_KERNEL_IMAGE_FILE}" ];then

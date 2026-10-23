@@ -1,0 +1,1405 @@
+diff --git a/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json
+index c5ae52d7..8dc8b488 100644
+--- a/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json
++++ b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json
+@@ -2,10 +2,235 @@
+   "layoutDescription": {
+     "pageCount": 1,
+     "row": 9,
+-    "column": 15,
++    "column": 16,
+     "maxPage": 1,
+     "maxForm": 80
+   },
+   "layoutInfo": [
++    {
++      "bundleName": "com.ohos.bluetooth",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 0,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.dhardwareui",
++      "abilityName": "DHardwareUIAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 1,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.locationdialog",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 2,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.terminal",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 3,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.calculator",
++      "abilityName": "CalculatorAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 4,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.calendar",
++      "abilityName": "MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 5,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.callui",
++      "abilityName": "com.ohos.callui.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 6,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.camera",
++      "abilityName": "com.ohos.camera.MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 7,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.certmanager",
++      "abilityName": "MainAbility",
++      "moduleName": "CertManager",
++      "container": -100,
++      "typeId": 0,
++      "column": 8,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.contacts",
++      "abilityName": "com.ohos.contacts.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 9,
++      "row": 0
++    },
++    {
++      "bundleName": "ohos.samples.distributedmusicplayer",
++      "abilityName": "ohos.samples.distributedmusicplayer.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 10,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.emergencycommunication",
++      "abilityName": "com.ohos.emergencycommunication.SOSEmergencyCallAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 11,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.filemanager",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 12,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.intelligentscene",
++      "abilityName": "EntryAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 13,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.mms",
++      "abilityName": "com.ohos.mms.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 14,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.note",
++      "abilityName": "MainAbility",
++      "moduleName": "default",
++      "container": -100,
++      "typeId": 0,
++      "column": 15,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.photos",
++      "abilityName": "com.ohos.photos.MainAbility",
++      "moduleName": "phone_photos",
++      "container": -100,
++      "typeId": 0,
++      "column": 0,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.security.privacycenter",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 1,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.settings",
++      "abilityName": "com.ohos.settings.MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 2,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.soundrecorder",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 3,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.updateapp",
++      "abilityName": "com.ohos.updateapp.MainAbility",
++      "moduleName": "updateapp",
++      "container": -100,
++      "typeId": 0,
++      "column": 4,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.clock",
++      "abilityName": "com.ohos.clock.phone",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 5,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.browser",
++      "abilityName": "MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 6,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.players",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 7,
++      "row": 1
++    },
++    {
++      "bundleName": "org.aira.browser",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 8,
++      "row": 1
++    }
+   ]
+ }
+\ No newline at end of file
+diff --git a/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo_pc_mode.json b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo_pc_mode.json
+new file mode 100644
+index 00000000..8dc8b488
+--- /dev/null
++++ b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo_pc_mode.json
+@@ -0,0 +1,236 @@
++{
++  "layoutDescription": {
++    "pageCount": 1,
++    "row": 9,
++    "column": 16,
++    "maxPage": 1,
++    "maxForm": 80
++  },
++  "layoutInfo": [
++    {
++      "bundleName": "com.ohos.bluetooth",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 0,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.dhardwareui",
++      "abilityName": "DHardwareUIAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 1,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.locationdialog",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 2,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.terminal",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 3,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.calculator",
++      "abilityName": "CalculatorAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 4,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.calendar",
++      "abilityName": "MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 5,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.callui",
++      "abilityName": "com.ohos.callui.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 6,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.camera",
++      "abilityName": "com.ohos.camera.MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 7,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.certmanager",
++      "abilityName": "MainAbility",
++      "moduleName": "CertManager",
++      "container": -100,
++      "typeId": 0,
++      "column": 8,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.contacts",
++      "abilityName": "com.ohos.contacts.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 9,
++      "row": 0
++    },
++    {
++      "bundleName": "ohos.samples.distributedmusicplayer",
++      "abilityName": "ohos.samples.distributedmusicplayer.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 10,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.emergencycommunication",
++      "abilityName": "com.ohos.emergencycommunication.SOSEmergencyCallAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 11,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.filemanager",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 12,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.intelligentscene",
++      "abilityName": "EntryAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 13,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.mms",
++      "abilityName": "com.ohos.mms.MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 14,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.note",
++      "abilityName": "MainAbility",
++      "moduleName": "default",
++      "container": -100,
++      "typeId": 0,
++      "column": 15,
++      "row": 0
++    },
++    {
++      "bundleName": "com.ohos.photos",
++      "abilityName": "com.ohos.photos.MainAbility",
++      "moduleName": "phone_photos",
++      "container": -100,
++      "typeId": 0,
++      "column": 0,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.security.privacycenter",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 1,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.settings",
++      "abilityName": "com.ohos.settings.MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 2,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.soundrecorder",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 3,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.updateapp",
++      "abilityName": "com.ohos.updateapp.MainAbility",
++      "moduleName": "updateapp",
++      "container": -100,
++      "typeId": 0,
++      "column": 4,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.clock",
++      "abilityName": "com.ohos.clock.phone",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 5,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.browser",
++      "abilityName": "MainAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 6,
++      "row": 1
++    },
++    {
++      "bundleName": "com.ohos.players",
++      "abilityName": "MainAbility",
++      "moduleName": "phone",
++      "container": -100,
++      "typeId": 0,
++      "column": 7,
++      "row": 1
++    },
++    {
++      "bundleName": "org.aira.browser",
++      "abilityName": "EntryAbility",
++      "moduleName": "entry",
++      "container": -100,
++      "typeId": 0,
++      "column": 8,
++      "row": 1
++    }
++  ]
++}
+\ No newline at end of file
+diff --git a/feature/smartdock/pcsmartdock/src/main/ets/default/layout/DockStatusBarComponent.ets b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/DockStatusBarComponent.ets
+index 2fe11575..0fa1771b 100644
+--- a/feature/smartdock/pcsmartdock/src/main/ets/default/layout/DockStatusBarComponent.ets
++++ b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/DockStatusBarComponent.ets
+@@ -66,6 +66,7 @@ import {
+   PluginPositionType } from '@ohos/statusbarcomponent/src/main/ets/pc/common/PluginConstants';
+ import { LocalGroup } from '@ohos/statusbarcomponent/src/main/ets/pc/pages/StatusBarLocalGroup';
+ import { StatusBarGroupComponent } from '@ohos/statusbarcomponent/src/main/ets/pc/pages/StatusBarGroupComponent';
++import { ImeIndicatorComponent } from './ImeIndicatorComponent';
+ import screenSessionManager from '@ohos.screenSessionManager';
+ import { RotationConstants } from '@ohos/commonconstants';
+ import { trayPanelMenuVM } from '@ohos/statusbarcomponent/src/main/ets/pc/viewmodel/TrayPanelMenuVM';
+@@ -500,6 +501,8 @@ export struct DockStatusBarComponent {
+         Row()
+           .width(this.spaceRowWidth)
+           .height('100%')
++        ImeIndicatorComponent({ contentColor: this.contentColor })
++          .opacity(this.pluginStyle.opacity)
+         if (this.showArrowButton) {
+           this.arrowButton()
+         }
+diff --git a/feature/smartdock/pcsmartdock/src/main/ets/default/layout/FixedLayout.ets b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/FixedLayout.ets
+index 787f7736..00eb09da 100644
+--- a/feature/smartdock/pcsmartdock/src/main/ets/default/layout/FixedLayout.ets
++++ b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/FixedLayout.ets
+@@ -37,7 +37,9 @@ import {
+   GlobalContext,
+   localEventManager,
+   HiSysEventUtil,
+-  DeviceHelper
++  DeviceHelper,
++  viewMgrPolicy,
++  ViewType
+ } from '@ohos/frameworkwrapper';
+ import {
+   StyleConstants,
+@@ -84,6 +86,8 @@ import PcModeContinuableModel from '@ohos/smartdock/src/main/ets/default/pcmode/
+ import { PcModeDockUtils } from '@ohos/smartdock/src/main/ets/default/utils/PcModeDockUtils';
+ import { PcSmartDockStyleManager, PcDockStyleConfig } from '../common/PcSmartDockStyleManager';
+ import { PluginStyleUtil } from '@ohos/statusbarcomponent/src/main/ets/pc/common/PluginStyleUtil';
++import HarmonyRingPage from '@ohos/statusbarcomponent/src/main/ets/pc/pages/PcHarmonyIconPage';
++import power from '@ohos.power';
+ 
+ const TAG = 'FixedLayout';
+ const log: LogHelper = LogHelper.getLogHelper(LogDomain.HOME, 'PCDock-' + TAG);
+@@ -1656,6 +1660,14 @@ export default struct FixedLayout {
+     return this.currColorMode === 0;
+   }
+ 
++  /**
++   * 鸿蒙环（开始菜单）：独立组件，自带 contentColor provide，避免与 DockStatusBarComponent 冲突
++   */
++  @Builder
++  harmonyRingBuilder() {
++    HarmonyRingEntry()
++  }
++
+   @Builder
+   dockDividerBuilder() {
+     Divider()
+@@ -1761,6 +1773,8 @@ export default struct FixedLayout {
+         .height('100%')
+ 
+         this.dockStatusBarBuilder();
++
++        this.harmonyRingBuilder();
+       }
+       .onTouch((event: TouchEvent) => {
+         if (event && event.type === TouchType.Up && event.touches && event.touches.length > 0 &&
+@@ -1783,4 +1797,107 @@ export default struct FixedLayout {
+     .width('100%')
+     .height('100%')
+   }
++}
++
++/**
++ * 鸿蒙环（开始菜单）独立组件：
++ * 自带 contentColor provide，避免与 DockStatusBarComponent 的 @Provide 冲突；
++ * 点击弹出开始菜单（应用列表入口 + 电源）。
++ */
++@Component
++struct HarmonyRingEntry {
++  @Provide contentColor: string = '#000000';
++  @State ringMenuShow: boolean = false;
++
++  private ringOpenAppCenter(): void {
++    log.showInfo('harmony ring: open app center');
++    try {
++      if (viewMgrPolicy.isViewShowing(ViewType.APP_CENTER)) {
++        if (GlobalContext.getInstance().hasObject('hideAppCenterWithAnimation')) {
++          let hide = (GlobalContext.getInstance().getObject('hideAppCenterWithAnimation')) as Function;
++          hide(0);
++          return;
++        }
++      }
++    } catch (error) {
++      log.showError(`harmony ring app center error: ${error}`);
++    }
++    viewMgrPolicy.showView(ViewType.APP_CENTER);
++  }
++
++  private ringSleep(): void {
++    log.showInfo('harmony ring: sleep');
++    try {
++      power.suspend(true);
++    } catch (error) {
++      log.showError(`harmony ring sleep error: ${error}`);
++    }
++  }
++
++  private ringReboot(): void {
++    log.showInfo('harmony ring: reboot');
++    try {
++      power.reboot('reboot_by_user');
++    } catch (error) {
++      log.showError(`harmony ring reboot error: ${error}`);
++    }
++  }
++
++  private ringShutdown(): void {
++    log.showInfo('harmony ring: shutdown');
++    try {
++      power.shutdown('shutdown_by_user');
++    } catch (error) {
++      log.showError(`harmony ring shutdown error: ${error}`);
++    }
++  }
++
++  @Builder
++  ringMenuBuilder() {
++    Menu() {
++      MenuItem({ content: $r('app.string.dock_hover_text_appcenter') })
++        .onClick(() => this.ringOpenAppCenter())
++      MenuItem({ content: $r('app.string.sleep') })
++        .onClick(() => this.ringSleep())
++      MenuItem({ content: $r('app.string.reboot_device') })
++        .onClick(() => this.ringReboot())
++      MenuItem({ content: $r('app.string.shutdown_device') })
++        .onClick(() => this.ringShutdown())
++    }
++  }
++
++  build() {
++    Row() {
++      Column() {
++        HarmonyRingPage()
++      }
++      .width(48)
++      .height(48)
++      .justifyContent(FlexAlign.Center)
++      .alignItems(HorizontalAlign.Center)
++      .onClick(() => {
++        this.ringMenuShow = !this.ringMenuShow;
++      })
++      .bindPopup(this.ringMenuShow, {
++        builder: this.ringMenuBuilder(),
++        placement: Placement.Top,
++        mask: false,
++        enableArrow: false,
++        autoCancel: true,
++        showInSubWindow: true,
++        radius: StyleConstants.DEFAULT_8,
++        shadow: ShadowStyle.OUTER_DEFAULT_SM,
++        backgroundBlurStyle: BlurStyle.COMPONENT_REGULAR,
++        onStateChange: (e) => {
++          if (!e.isVisible) {
++            this.ringMenuShow = false;
++          }
++        }
++      })
++      .id('ScbSmartDock_harmony_ring')
++    }
++    .height('100%')
++    .justifyContent(FlexAlign.Center)
++    .alignItems(VerticalAlign.Center)
++  }
+ }
+\ No newline at end of file
+diff --git a/feature/smartdock/pcsmartdock/src/main/ets/default/layout/ImeIndicatorComponent.ets b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/ImeIndicatorComponent.ets
+new file mode 100644
+index 00000000..58c851c4
+--- /dev/null
++++ b/feature/smartdock/pcsmartdock/src/main/ets/default/layout/ImeIndicatorComponent.ets
+@@ -0,0 +1,380 @@
++/**
++ * Copyright (c) 2025 Huawei Device Co., Ltd.
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// PC taskbar input-method indicator (Windows / macOS style).
++// - Shows the active IME / Rime schema + Chinese/English and an A/a CapsLock badge.
++//   The Simplified/Traditional badge is hidden by default to keep the indicator
++//   compact; set the system parameter `persist.scb.ime.show_traditional=true` to
++//   pin it. Toggling Simplified/Traditional still raises a toast either way.
++// - Subscribes to the public event 'com.ohos.rimeime.STATE' published by the
++//   com.ohos.rimeime IME and raises a toast when the state changes.
++// - Input-method switching no longer happens on left click: left click is a **no-op**
++//   (the indicator is status display only), right click opens a native ArkUI Menu
++//   ("切换输入法 / 输入法与语言设置 / Rime 设置") anchored right above the indicator.
++//   "切换输入法" hands over to the system Settings app on the "语言和输入法" page (the
++//   single place where the user switches/enables IMEs). The old system chooser dialog
++//   (com.ohos.inputmethodchoosedialog) is not reachable from the dock because a
++//   desktop-level modal that can be dismissed only by picking an IME is a trap.
++import { LogDomain, LogHelper } from '@ohos/basicutils';
++import inputMethod from '@ohos.inputMethod';
++import InputMethodSubtype from '@ohos.InputMethodSubtype';
++import commonEventManager from '@ohos.commonEventManager';
++import type { BusinessError } from '@ohos.base';
++import common from '@ohos.app.ability.common';
++import type Want from '@ohos.app.ability.Want';
++import { promptAction, SymbolGlyphModifier } from '@kit.ArkUI';
++import { systemParameterEnhance } from '@kit.BasicServicesKit';
++
++const TAG = 'ImeIndicator';
++const log: LogHelper = LogHelper.getLogHelper(LogDomain.HOME, TAG);
++const INDICATOR_HEIGHT: number = 28;
++const STATE_EVENT: string = 'com.ohos.rimeime.STATE';
++const RIME_BUNDLE: string = 'com.ohos.rimeime';
++const RIME_SETTINGS_ABILITY: string = 'RimeSettingsAbility';
++const RIME_MODULE: string = 'entry';
++// The system Settings app is the one and only place for switching / enabling IMEs.
++const SETTINGS_BUNDLE: string = 'com.ohos.settings';
++const SETTINGS_ABILITY: string = 'com.ohos.settings.MainAbility';
++// The Settings app routes by NavEntryKey, NOT by page url: MainAbility.uriChangeProcess
++// (product/phone/src/main/ets/MainAbility/MainAbility.ets:206) only translates the
++// `settings://xxx` link map, and Navigation.navDestination looks the target up in
++// DynamicLoader.loaderMap, which is keyed by NavEntryKey ('set_input' =
++// common/src/main/ets/utils/Consts.ets:77). Passing the url 'pages/input/InputSettings'
++// creates an empty NavDestination: "DynamicLoader: Page Load Failure" +
++// "AceNavigation: can't find name in config file" -> a blank page with only a back arrow.
++const SETTINGS_INPUT_URI: string = 'set_input';
++// Optional config: when set to 'true', the indicator keeps the 简/繁 badge visible.
++const SHOW_TRADITIONAL_PARAM: string = 'persist.scb.ime.show_traditional';
++
++interface RimeStateParams {
++  schema?: string;
++  schemaLabel?: string;
++  chinese?: boolean;
++  traditional?: boolean;
++  capsLock?: boolean;
++}
++
++@Component
++export struct ImeIndicatorComponent {
++  @Prop contentColor: string = '#FFFFFF';
++  @State imeLabel: string = '';
++  @State schemaLabel: string = '';
++  @State chinese: boolean = true;
++  @State traditional: boolean = false;
++  @State capsLock: boolean = false;
++  @State isRime: boolean = false;
++  @State hasRimeState: boolean = false;
++  @State showTraditional: boolean = false;
++
++  private subscriber: commonEventManager.CommonEventSubscriber | undefined = undefined;
++  private subscribeInfo: commonEventManager.CommonEventSubscribeInfo = { events: [STATE_EVENT] };
++
++  // Native context menu anchored right above the indicator, with a frosted-glass
++  // background and rounded corners (standard ArkUI look & feel).
++  private menuOptions: ContextMenuOptions = {
++    placement: Placement.Top,
++    enableArrow: true,
++    borderRadius: 12,
++    offset: { x: 0, y: -6 },
++    backgroundBlurStyle: BlurStyle.COMPONENT_ULTRA_THICK
++  };
++
++  private listener: (p: inputMethod.InputMethodProperty, s: InputMethodSubtype) => void =
++    (p: inputMethod.InputMethodProperty, s: InputMethodSubtype): void => {
++      this.updateFromImf(p, s);
++    };
++
++  aboutToAppear(): void {
++    log.showInfo('ImeIndicatorComponent aboutToAppear');
++    this.loadDisplayConfig();
++    try {
++      inputMethod.getInputMethodSetting().on('imeChange', this.listener);
++    } catch (err) {
++      log.showError(`register imeChange failed: ${JSON.stringify(err)}`);
++    }
++    this.refresh();
++    this.subscribeRimeState();
++  }
++
++  aboutToDisappear(): void {
++    log.showInfo('ImeIndicatorComponent aboutToDisappear');
++    try {
++      inputMethod.getInputMethodSetting().off('imeChange', this.listener);
++    } catch (err) {
++      log.showError(`unregister imeChange failed: ${JSON.stringify(err)}`);
++    }
++    try {
++      if (this.subscriber !== undefined) {
++        commonEventManager.unsubscribe(this.subscriber);
++        this.subscriber = undefined;
++      }
++    } catch (err) {
++      log.showError(`unsubscribe STATE failed: ${JSON.stringify(err)}`);
++    }
++  }
++
++  private loadDisplayConfig(): void {
++    try {
++      this.showTraditional =
++        systemParameterEnhance.getSync(SHOW_TRADITIONAL_PARAM, 'false') === 'true';
++    } catch (err) {
++      log.showError(`loadDisplayConfig failed: ${JSON.stringify(err)}`);
++    }
++  }
++
++  private subscribeRimeState(): void {
++    commonEventManager.createSubscriber(this.subscribeInfo)
++      .then((subscriber: commonEventManager.CommonEventSubscriber) => {
++        this.subscriber = subscriber;
++        commonEventManager.subscribe(subscriber,
++          (err: BusinessError, data: commonEventManager.CommonEventData) => {
++          if (err && err.code) {
++            log.showError(`STATE subscribe failed: ${JSON.stringify(err)}`);
++            return;
++          }
++          this.onRimeState(data);
++        });
++      })
++      .catch((err: Object) => {
++        log.showError(`createSubscriber STATE failed: ${JSON.stringify(err)}`);
++      });
++  }
++
++  private onRimeState(data: commonEventManager.CommonEventData): void {
++    if (data === undefined || data.parameters === undefined) {
++      return;
++    }
++    let p = data.parameters as Record<string, Object>;
++    let schemaLabel: string = p['schemaLabel'] !== undefined ? p['schemaLabel'] as string : '';
++    let chinese: boolean = p['chinese'] !== undefined ? p['chinese'] as boolean : true;
++    let traditional: boolean = p['traditional'] !== undefined ? p['traditional'] as boolean : false;
++    let capsLock: boolean = p['capsLock'] !== undefined ? p['capsLock'] as boolean : false;
++    log.showInfo(`STATE schema=${schemaLabel} chinese=${chinese} trad=${traditional} caps=${capsLock}`);
++    // The common-event callback may run off the UI thread; marshal the state
++    // update (and toast) onto the UI thread so @State changes take effect.
++    try {
++      this.getUIContext().runScopedTask(() => {
++        this.applyRimeState(schemaLabel, chinese, traditional, capsLock);
++      });
++    } catch (err) {
++      log.showError(`runScopedTask failed: ${JSON.stringify(err)}`);
++      this.applyRimeState(schemaLabel, chinese, traditional, capsLock);
++    }
++  }
++
++  private applyRimeState(schemaLabel: string, chinese: boolean, traditional: boolean,
++    capsLock: boolean): void {
++    if (!this.hasRimeState) {
++      // First state after boot: adopt silently, no toast.
++      this.hasRimeState = true;
++      this.schemaLabel = schemaLabel;
++      this.chinese = chinese;
++      this.traditional = traditional;
++      this.capsLock = capsLock;
++      return;
++    }
++    if (schemaLabel !== this.schemaLabel && schemaLabel.length > 0) {
++      this.schemaLabel = schemaLabel;
++      this.toast('输入方案：' + schemaLabel);
++    }
++    if (chinese !== this.chinese) {
++      this.chinese = chinese;
++      this.toast(chinese ? '中文' : 'English');
++    }
++    if (traditional !== this.traditional) {
++      this.traditional = traditional;
++      this.toast(traditional ? '繁體' : '简体');
++    }
++    this.capsLock = capsLock;
++  }
++
++  private toast(message: string): void {
++    try {
++      promptAction.showToast({
++        message: message,
++        showMode: promptAction.ToastShowMode.TOP_MOST
++      });
++    } catch (err) {
++      log.showError(`showToast failed: ${JSON.stringify(err)}`);
++    }
++  }
++
++  private refresh(): void {
++    try {
++      let property: inputMethod.InputMethodProperty = inputMethod.getCurrentInputMethod();
++      let subtype: InputMethodSubtype = inputMethod.getCurrentInputMethodSubtype();
++      this.updateFromImf(property, subtype);
++    } catch (err) {
++      log.showError(`refresh failed: ${JSON.stringify(err)}`);
++    }
++  }
++
++  private updateFromImf(property: inputMethod.InputMethodProperty, subtype: InputMethodSubtype): void {
++    let label: string = this.pickLabel(property, subtype);
++    this.isRime = property !== undefined && property.name === RIME_BUNDLE;
++    log.showInfo(`ime label -> ${label} isRime=${this.isRime}`);
++    this.imeLabel = label;
++  }
++
++  private isValidLabel(value?: string): boolean {
++    return value !== undefined && value.length > 0 && value.charAt(0) !== '$';
++  }
++
++  private pickLabel(property: inputMethod.InputMethodProperty, subtype: InputMethodSubtype): string {
++    if (this.isValidLabel(subtype?.label)) {
++      return subtype.label as string;
++    }
++    if (this.isValidLabel(property?.label)) {
++      return property.label as string;
++    }
++    let language: string = subtype !== undefined ? subtype.language : '';
++    if (language.startsWith('zh')) {
++      return '中';
++    }
++    if (language.startsWith('en')) {
++      return 'EN';
++    }
++    if (property !== undefined && property.name !== undefined && property.name.length > 0) {
++      return property.name;
++    }
++    return 'IME';
++  }
++
++  // Main label: for Rime show "schema · 中/EN", otherwise the IMF label.
++  private mainLabel(): string {
++    if (this.schemaLabel.length > 0) {
++      return this.schemaLabel + ' · ' + (this.chinese ? '中' : 'EN');
++    }
++    return this.imeLabel.length > 0 ? this.imeLabel : 'IME';
++  }
++
++  // Menu entry "切换输入法": hand the user over to the system Settings app so that
++  // switching or enabling an IME is done in one obvious, standard place.
++  private openSettingsInputPage(): void {
++    log.showInfo('openSettingsInputPage');
++    try {
++      let context = getContext(this) as common.UIAbilityContext;
++      let want: Want = {
++        bundleName: SETTINGS_BUNDLE,
++        abilityName: SETTINGS_ABILITY,
++        uri: SETTINGS_INPUT_URI
++      };
++      context.startAbility(want).then(() => {
++        log.showInfo('startAbility settings input page ok');
++      }).catch((err: Object) => {
++        log.showError(`startAbility settings input page failed: ${JSON.stringify(err)}`);
++        this.toast('输入法切换：设置 → 语言和输入法');
++      });
++    } catch (err) {
++      log.showError(`openSettingsInputPage failed: ${JSON.stringify(err)}`);
++      this.toast('输入法切换：设置 → 语言和输入法');
++    }
++  }
++
++  private openRimeSettings(): void {
++    log.showInfo('openRimeSettings');
++    try {
++      let context = getContext(this) as common.UIAbilityContext;
++      let want: Want = {
++        bundleName: RIME_BUNDLE,
++        moduleName: RIME_MODULE,
++        abilityName: RIME_SETTINGS_ABILITY
++      };
++      context.startAbility(want).then(() => {
++        log.showInfo('startAbility RimeSettings ok');
++      }).catch((err: Object) => {
++        log.showError(`startAbility RimeSettings failed: ${JSON.stringify(err)}`);
++      });
++    } catch (err) {
++      log.showError(`openRimeSettings failed: ${JSON.stringify(err)}`);
++    }
++  }
++
++  @Builder
++  IndicatorMenu() {
++    Menu() {
++      MenuItem({
++        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.globe_and_keyboard')),
++        content: '切换输入法'
++      })
++        .onClick(() => {
++          this.openSettingsInputPage();
++        })
++      MenuItem({
++        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape')),
++        content: '输入法与语言设置'
++      })
++        .onClick(() => {
++          this.openSettingsInputPage();
++        })
++      MenuItem({
++        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.keyboard_fill')),
++        content: 'Rime 设置'
++      })
++        .onClick(() => {
++          this.openRimeSettings();
++        })
++    }
++    .radius(14)
++    // No fixed width: the menu hugs its content so short labels never get a wide
++    // empty box and longer labels are never truncated.
++    .constraintSize({ minWidth: 176, maxWidth: 260 })
++  }
++
++  build() {
++    Row() {
++      Text(this.mainLabel())
++        .id('ScbSmartDock_ime_indicator')
++        .fontSize(12)
++        .fontColor(this.contentColor)
++        .fontWeight(FontWeight.Medium)
++        .textAlign(TextAlign.Center)
++        .maxLines(1)
++        .textOverflow({ overflow: TextOverflow.Ellipsis })
++        .constraintSize({ maxWidth: 110 })
++      if (this.schemaLabel.length > 0 && this.showTraditional) {
++        Text(this.traditional ? '繁' : '简')
++          .fontSize(10)
++          .fontColor(this.contentColor)
++          .opacity(0.7)
++          .margin({ left: 4 })
++      }
++      if (this.schemaLabel.length > 0) {
++        Text(this.capsLock ? 'A' : 'a')
++          .id('ScbSmartDock_ime_caps')
++          .fontSize(10)
++          .fontWeight(this.capsLock ? FontWeight.Bold : FontWeight.Normal)
++          .fontColor(this.contentColor)
++          .opacity(this.capsLock ? 1.0 : 0.5)
++          .margin({ left: 4 })
++      }
++    }
++    .constraintSize({ minWidth: 36, maxWidth: 140 })
++    .height(INDICATOR_HEIGHT)
++    .padding({ left: 8, right: 8 })
++    .borderRadius(6)
++    .backgroundColor('#22000000')
++    .margin({ right: 6 })
++    .hoverEffect(HoverEffect.Highlight)
++    // Left click is intentionally a no-op (user requirement): the indicator is a
++    // status display only. Switching an IME lives in the context menu ("切换输入法"),
++    // which hands over to the system Settings "语言和输入法" page.
++    .onClick(() => {
++      log.showInfo('left click ignored: use the context menu');
++    })
++    .bindContextMenu(this.IndicatorMenu(), ResponseType.RightClick, this.menuOptions)
++    .bindContextMenu(this.IndicatorMenu(), ResponseType.LongPress, this.menuOptions)
++  }
++}
+diff --git a/feature/smartdock/pcsmartdock/src/main/resources/base/element/string.json b/feature/smartdock/pcsmartdock/src/main/resources/base/element/string.json
+index f4992ee4..8bd3c5da 100644
+--- a/feature/smartdock/pcsmartdock/src/main/resources/base/element/string.json
++++ b/feature/smartdock/pcsmartdock/src/main/resources/base/element/string.json
+@@ -94,6 +94,27 @@
+             "attr":{
+                 "priority":"translate"
+             }
++        },
++        {
++            "name":"sleep",
++            "value":"Sleep",
++            "attr":{
++                "priority":"translate"
++            }
++        },
++        {
++            "name":"reboot_device",
++            "value":"Restart",
++            "attr":{
++                "priority":"translate"
++            }
++        },
++        {
++            "name":"shutdown_device",
++            "value":"Power off",
++            "attr":{
++                "priority":"translate"
++            }
+         }
+     ]
+ }
+\ No newline at end of file
+diff --git a/feature/smartdock/pcsmartdock/src/main/resources/zh_CN/element/string.json b/feature/smartdock/pcsmartdock/src/main/resources/zh_CN/element/string.json
+index 915af99f..071136b9 100644
+--- a/feature/smartdock/pcsmartdock/src/main/resources/zh_CN/element/string.json
++++ b/feature/smartdock/pcsmartdock/src/main/resources/zh_CN/element/string.json
+@@ -94,6 +94,27 @@
+             "attr":{
+                 "priority":"translate"
+             }
++        },
++        {
++            "name":"sleep",
++            "value":"睡眠",
++            "attr":{
++                "priority":"translate"
++            }
++        },
++        {
++            "name":"reboot_device",
++            "value":"重启",
++            "attr":{
++                "priority":"translate"
++            }
++        },
++        {
++            "name":"shutdown_device",
++            "value":"关机",
++            "attr":{
++                "priority":"translate"
++            }
+         }
+     ]
+ }
+\ No newline at end of file
+diff --git a/feature/statusbarcomponent/src/main/ets/pc/pluginvisible/LocalVisibleControl.ets b/feature/statusbarcomponent/src/main/ets/pc/pluginvisible/LocalVisibleControl.ets
+index e9f44582..0c3bc2f9 100644
+--- a/feature/statusbarcomponent/src/main/ets/pc/pluginvisible/LocalVisibleControl.ets
++++ b/feature/statusbarcomponent/src/main/ets/pc/pluginvisible/LocalVisibleControl.ets
+@@ -23,7 +23,7 @@ const log: LogHelper = LogHelper.getLogHelper(LogDomain.SCB, TAG);
+ 
+ export class LocalVisibleControl extends VisibleControlBase {
+   private localPluginCustomVisibleMap: Map<string, () => boolean> = new Map([
+-    [PluginSlot.SLOT_STATUS_PERSONAL, () => false],
++    [PluginSlot.SLOT_STATUS_PERSONAL, () => true],
+   ]);
+ 
+   protected notifyPluginAdd(plugin: PluginProperty): void {
+diff --git a/feature/statusbarcomponent/src/main/resources/base/media/pc_dark_syskey.svg b/feature/statusbarcomponent/src/main/resources/base/media/pc_dark_syskey.svg
+index 5e1aa633..cc36ed48 100644
+--- a/feature/statusbarcomponent/src/main/resources/base/media/pc_dark_syskey.svg
++++ b/feature/statusbarcomponent/src/main/resources/base/media/pc_dark_syskey.svg
+@@ -1,7 +1,9 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+-    <title>空白</title>
++    <title>系统菜单</title>
+     <defs></defs>
+-    <g id="空白" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++    <g id="系统菜单" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++        <path d="M20 6.5 C20.828 6.5 21.5 7.172 21.5 8 L21.5 20 C21.5 20.828 20.828 21.5 20 21.5 C19.172 21.5 18.5 20.828 18.5 20 L18.5 8 C18.5 7.172 19.172 6.5 20 6.5 Z" fill="#FFFFFF"></path>
++        <path d="M12.6 11.2 C13.28 10.72 14.22 10.9 14.7 11.58 C15.18 12.26 15.01 13.2 14.32 13.68 C11.86 15.39 10.4 18.13 10.4 21.1 C10.4 26.4 14.7 30.7 20 30.7 C25.3 30.7 29.6 26.4 29.6 21.1 C29.6 18.13 28.14 15.39 25.68 13.68 C25 13.2 24.82 12.26 25.3 11.58 C25.78 10.9 26.72 10.72 27.4 11.2 C30.5 13.35 32.4 16.95 32.4 21.1 C32.4 27.95 26.85 33.5 20 33.5 C13.15 33.5 7.6 27.95 7.6 21.1 C7.6 16.95 9.5 13.35 12.6 11.2 Z" fill="#FFFFFF"></path>
+     </g>
+-</svg>
+\ No newline at end of file
++</svg>
+diff --git a/feature/statusbarcomponent/src/main/resources/base/media/pc_light_syskey.svg b/feature/statusbarcomponent/src/main/resources/base/media/pc_light_syskey.svg
+index 5e1aa633..a3891298 100644
+--- a/feature/statusbarcomponent/src/main/resources/base/media/pc_light_syskey.svg
++++ b/feature/statusbarcomponent/src/main/resources/base/media/pc_light_syskey.svg
+@@ -1,7 +1,9 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+ <svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+-    <title>空白</title>
++    <title>系统菜单</title>
+     <defs></defs>
+-    <g id="空白" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++    <g id="系统菜单" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++        <path d="M20 6.5 C20.828 6.5 21.5 7.172 21.5 8 L21.5 20 C21.5 20.828 20.828 21.5 20 21.5 C19.172 21.5 18.5 20.828 18.5 20 L18.5 8 C18.5 7.172 19.172 6.5 20 6.5 Z" fill="#000000"></path>
++        <path d="M12.6 11.2 C13.28 10.72 14.22 10.9 14.7 11.58 C15.18 12.26 15.01 13.2 14.32 13.68 C11.86 15.39 10.4 18.13 10.4 21.1 C10.4 26.4 14.7 30.7 20 30.7 C25.3 30.7 29.6 26.4 29.6 21.1 C29.6 18.13 28.14 15.39 25.68 13.68 C25 13.2 24.82 12.26 25.3 11.58 C25.78 10.9 26.72 10.72 27.4 11.2 C30.5 13.35 32.4 16.95 32.4 21.1 C32.4 27.95 26.85 33.5 20 33.5 C13.15 33.5 7.6 27.95 7.6 21.1 C7.6 16.95 9.5 13.35 12.6 11.2 Z" fill="#000000"></path>
+     </g>
+-</svg>
+\ No newline at end of file
++</svg>
+diff --git a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_black.svg b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_black.svg
+index 5e1aa633..75b0d3db 100644
+--- a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_black.svg
++++ b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_black.svg
+@@ -1,7 +1,11 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+-<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+-    <title>空白</title>
+-    <defs></defs>
+-    <g id="空白" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg">
++    <title>鸿蒙环深色</title>
++    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++        <path d="M20 5.5 A14.5 14.5 0 1 1 8.2 12.6"
++              fill="none"
++              stroke="#000000"
++              stroke-width="4.2"
++              stroke-linecap="round"/>
+     </g>
+-</svg>
+\ No newline at end of file
++</svg>
+diff --git a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_ori.svg b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_ori.svg
+index 5e1aa633..3b9f1ef4 100644
+--- a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_ori.svg
++++ b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_ori.svg
+@@ -1,7 +1,18 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+-<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+-    <title>空白</title>
+-    <defs></defs>
+-    <g id="空白" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg">
++    <title>鸿蒙环</title>
++    <defs>
++        <linearGradient id="harmonyRingGrad" x1="20" y1="5.5" x2="20" y2="34.5" gradientUnits="userSpaceOnUse">
++            <stop offset="0" stop-color="#0A59F7"/>
++            <stop offset="0.5" stop-color="#2AB6C6"/>
++            <stop offset="1" stop-color="#2BD87A"/>
++        </linearGradient>
++    </defs>
++    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++        <path d="M20 5.5 A14.5 14.5 0 1 1 8.2 12.6"
++              fill="none"
++              stroke="url(#harmonyRingGrad)"
++              stroke-width="4.2"
++              stroke-linecap="round"/>
+     </g>
+-</svg>
+\ No newline at end of file
++</svg>
+diff --git a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_stroke.svg b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_stroke.svg
+index 5e1aa633..98cc6a35 100644
+--- a/feature/statusbarcomponent/src/main/resources/base/media/system_ring_stroke.svg
++++ b/feature/statusbarcomponent/src/main/resources/base/media/system_ring_stroke.svg
+@@ -1,7 +1,18 @@
+ <?xml version="1.0" encoding="UTF-8"?>
+-<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+-    <title>空白</title>
+-    <defs></defs>
+-    <g id="空白" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++<svg width="40px" height="40px" viewBox="0 0 40 40" version="1.1" xmlns="http://www.w3.org/2000/svg">
++    <title>鸿蒙环描边</title>
++    <defs>
++        <linearGradient id="harmonyRingStrokeGrad" x1="20" y1="5.5" x2="20" y2="34.5" gradientUnits="userSpaceOnUse">
++            <stop offset="0" stop-color="#0A59F7"/>
++            <stop offset="0.5" stop-color="#2AB6C6"/>
++            <stop offset="1" stop-color="#2BD87A"/>
++        </linearGradient>
++    </defs>
++    <g stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
++        <path d="M20 5.5 A14.5 14.5 0 1 1 8.2 12.6"
++              fill="none"
++              stroke="url(#harmonyRingStrokeGrad)"
++              stroke-width="4.2"
++              stroke-linecap="round"/>
+     </g>
+-</svg>
+\ No newline at end of file
++</svg>
+diff --git a/product/pc/src/main/resources/base/media/icon.png b/product/pc/src/main/resources/base/media/icon.png
+new file mode 100644
+index 00000000..ce307a88
+Binary files /dev/null and b/product/pc/src/main/resources/base/media/icon.png differ
+diff --git a/product/pcbase/src/main/ets/SceneBoard/scenemanager/SCBScene.ets b/product/pcbase/src/main/ets/SceneBoard/scenemanager/SCBScene.ets
+index 4f372aa9..80010e5e 100644
+--- a/product/pcbase/src/main/ets/SceneBoard/scenemanager/SCBScene.ets
++++ b/product/pcbase/src/main/ets/SceneBoard/scenemanager/SCBScene.ets
+@@ -2510,11 +2510,13 @@ export struct SCBScene {
+         .opacity(this.sceneSession.opacity)
+         .blur(this.sceneSession.blurRadius)
+         .backgroundColor(this.needRenderSplitBackgroundColor.backgroundColor)
+-        .outlineRadius(this.getOutlineRadiuses())
+-        .outlineColor((this.sceneSession?.isHideShadow ||
+-          !this.isWindowShadowEnable) ? '#00000000' : this.strokeConfig.outlineColor)
+-        .outlineWidth((this.sceneSession?.isHideShadow ||
+-          !this.isWindowShadowEnable) ? 0 : `${this.strokeConfig.outlineWidth}px`)
++        .outline({
++          width: (this.sceneSession?.isHideShadow ||
++            !this.isWindowShadowEnable) ? 0 : `${this.strokeConfig.outlineWidth}px`,
++          color: (this.sceneSession?.isHideShadow ||
++            !this.isWindowShadowEnable) ? '#00000000' : this.strokeConfig.outlineColor,
++          radius: this.getOutlineRadiuses(),
++        })
+ 
+       if (this.sceneSession.isSessionResizeWhenDragEnd) {
+         this.showResizeWhenDragEnd()
+diff --git a/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets b/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets
+index 5e74a037..c1a61463 100644
+--- a/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets
++++ b/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets
+@@ -14,6 +14,7 @@
+  */
+ 
+ import {
++  AppItemInfo,
+   AppModel,
+   CalculateDesktopRst,
+   CommonConstants,
+@@ -28,7 +29,8 @@ import {
+   GridLayoutItemInfo,
+   GridLayoutUtil,
+   FormLayoutCacheManager,
+-  LaunchLayoutCacheManager
++  LaunchLayoutCacheManager,
++  NoIconAppModel
+ } from '@ohos/launchercommon';
+ import { PageDesktopLayoutConfig } from '@ohos/launchercommon';
+ import { PcDesktopLayoutInfo } from './configs/PcDesktopLayoutInfo';
+@@ -38,6 +40,7 @@ import {
+   FileUtils,
+   CheckEmptyUtils,
+   SingleContext,
++  OutdoorConfig,
+ } from '@ohos/basicutils';
+ import {localEventManager } from '@ohos/frameworkwrapper';
+ import { IconResourceManager, DeviceHelper, GlobalContext } from '@ohos/frameworkwrapper';
+@@ -148,7 +151,10 @@ export default class PcPageDesktopLayoutConfig extends PageDesktopLayoutConfig {
+     }
+     let rdbStartVersion: number = RdbStoreManager.getInstance().getRdbStartVersion();
+     log.showInfo(TAG, 'loadPersistConfig rdbStore version = %{public}d', rdbStartVersion);
+-    if ((configFromRdb && configFromRdb.length > 0) || (configFromRdb && this.isConfigExist() && rdbStartVersion > 0)) {
++    // fix_desktop_bt_grub: when the persisted desktop layout is EMPTY (e.g. it was first
++    // written while the preset rawfile was empty), fall back to the preset config instead
++    // of trusting the empty RDB.  Otherwise the desktop grid stays empty forever.
++    if (configFromRdb && configFromRdb.length > 0) {
+       log.showInfo(TAG, 'loadPersistConfig load data from db');
+     } else {
+       if (CheckEmptyUtils.isEmpty(this.mDesktopDataLoader)) {
+@@ -214,4 +220,91 @@ export default class PcPageDesktopLayoutConfig extends PageDesktopLayoutConfig {
+     super.persistConfig();
+     log.showInfo(TAG, 'initLayoutCache end');
+   }
++
++  /**
++   * fix_desktop_aira: last-resort safety net against an EMPTY desktop grid.
++   * If the preset layout produced nothing (e.g. the preset rawfile was empty /
++   * a stale RDB with no usable rows), fill the desktop with every installed
++   * app that has a launcher entry, so the desktop is never blank.
++   * In the normal case (a curated preset is present) this is a no-op.
++   */
++  protected dealNotInCCMApp(): void {
++    try {
++      if (this.mGridLayoutInfo && this.mGridLayoutInfo.layoutInfo &&
++        this.mGridLayoutInfo.layoutInfo.length > 0) {
++        return;
++      }
++      if (OutdoorConfig.getInstance().isInOutdoorMode()) {
++        return;
++      }
++      const totalAppInfoList: AppItemInfo[] = AppModel.getInstance().getAppList();
++      if (CheckEmptyUtils.isEmptyArr(totalAppInfoList)) {
++        log.showWarn(TAG, 'dealNotInCCMApp: app list empty, skip desktop top-up');
++        return;
++      }
++      let res: CalculateDesktopRst = LayoutViewModel.getInstance().calculateDesktop();
++      const rows: number = res.mRows ?? this.mGridLayoutInfo.layoutDescription.row;
++      const columns: number = res.mColumns ?? this.mGridLayoutInfo.layoutDescription.column;
++      const maxPage: number = this.mGridLayoutInfo.layoutDescription.maxPage > 0 ?
++        this.mGridLayoutInfo.layoutDescription.maxPage : 18;
++      let added: number = 0;
++      totalAppInfoList.forEach((app: AppItemInfo) => {
++        if (NoIconAppModel.getInstance().checkIfBundleIsNoIconApp(app.bundleName)) {
++          return;
++        }
++        let info: GridLayoutItemInfo = new GridLayoutItemInfo();
++        info.bundleName = app.bundleName;
++        info.abilityName = app.abilityName;
++        info.moduleName = app.moduleName;
++        info.typeId = CommonConstants.TYPE_APP;
++        info.area = [1, 1];
++        info.container = CommonConstants.CONTAINER_DESKTOP;
++        let startPage: number = 0;
++        while (!this.findPosition(info, startPage, rows, columns)) {
++          startPage = startPage + 1;
++          if (startPage >= maxPage) {
++            break;
++          }
++        }
++        if (this.updateAppInfoFromBMS(info, totalAppInfoList) && info.page !== undefined) {
++          this.mGridLayoutInfo.layoutInfo.push(info);
++          added = added + 1;
++        }
++      });
++      if (added > 0) {
++        log.showWarn(TAG, 'dealNotInCCMApp: empty preset, appended %{public}d installed apps', added);
++      }
++    } catch (err) {
++      log.showError(TAG, `dealNotInCCMApp err: ${err?.code} ${err?.message}`);
++    }
++  }
++
++  private isCellOccupied(page: number, row: number, column: number): boolean {
++    for (const item of this.mGridLayoutInfo.layoutInfo) {
++      const itemPage: number = item.page ?? 0;
++      if (itemPage !== page || item.row === undefined || item.column === undefined || !item.area) {
++        continue;
++      }
++      const xMatch: boolean = column >= item.column && column < item.column + item.area[0];
++      const yMatch: boolean = row >= item.row && row < item.row + item.area[1];
++      if (xMatch && yMatch) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  private findPosition(item: GridLayoutItemInfo, startPage: number, rows: number, columns: number): boolean {
++    for (let row = 0; row < rows; row++) {
++      for (let column = 0; column < columns; column++) {
++        if (!this.isCellOccupied(startPage, row, column)) {
++          item.page = startPage;
++          item.row = row;
++          item.column = column;
++          return true;
++        }
++      }
++    }
++    return false;
++  }
+ }

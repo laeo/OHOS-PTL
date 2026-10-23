@@ -1,0 +1,29 @@
+diff --git a/frameworks/core/components_ng/pattern/text_field/text_field_pattern.cpp b/frameworks/core/components_ng/pattern/text_field/text_field_pattern.cpp
+index 74a23eb8418..b087e2982ca 100644
+--- a/frameworks/core/components_ng/pattern/text_field/text_field_pattern.cpp
++++ b/frameworks/core/components_ng/pattern/text_field/text_field_pattern.cpp
+@@ -7566,7 +7566,9 @@ void TextFieldPattern::RequestKeyboardByFocusSwitch()
+             TAG_LOGI(AceLogTag::ACE_TEXT_FIELD, "no need to requestKB inner");
+             return;
+         }
+-        if (!textField->RequestKeyboard(false, true, textField->needToRequestKeyboardOnFocus_)) {
++        bool needShowSoftKeyboard =
++            textField->needToRequestKeyboardOnFocus_ && !textField->independentControlKeyboard_;
++        if (!textField->RequestKeyboard(false, true, needShowSoftKeyboard)) {
+             return;
+         }
+         textField->NotifyOnEditChanged(true);
+@@ -7582,7 +7584,12 @@ bool TextFieldPattern::RequestKeyboardNotByFocusSwitch(RequestKeyboardReason rea
+     TAG_LOGI(AceLogTag::ACE_TEXT_FIELD, "%{public}d requestKB, reason: %{public}s, sourceType:%{public}d",
+         tmpHost->GetId(), TextFieldPattern::RequestKeyboardReasonToString(reason).c_str(),
+         static_cast<int32_t>(sourceType));
+-    if (!RequestKeyboard(false, true, true, sourceType)) {
++    bool needShowSoftKeyboard = true;
++    if (independentControlKeyboard_ && (reason == RequestKeyboardReason::SINGLE_CLICK ||
++        reason == RequestKeyboardReason::DOUBLE_CLICK || reason == RequestKeyboardReason::MOUSE_RELEASE)) {
++        needShowSoftKeyboard = false;
++    }
++    if (!RequestKeyboard(false, true, needShowSoftKeyboard, sourceType)) {
+         return false;
+     }
+     auto context = tmpHost->GetContextRefPtr();

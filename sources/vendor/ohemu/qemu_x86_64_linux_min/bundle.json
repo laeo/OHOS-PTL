@@ -1,0 +1,29 @@
+{
+  "name": "@ohos/qemu_x86_64_linux_min_product",
+  "description": "product part definition for qemu x86_64 linux min",
+  "version": "4.0",
+  "license": "Apache License 2.0",
+  "publishAs": "code-segment",
+  "segment": {
+    "destPath": "vendor/ohemu/qemu_x86_64_linux_min"
+  },
+  "dirs": {},
+  "scripts": {},
+  "component": {
+    "name": "product_qemu-x86_64-linux-min",
+    "subsystem": "product_qemu-x86_64-linux-min",
+    "features": [],
+    "adapted_system_type": [
+      "standard"
+    ],
+    "rom": "",
+    "ram": "",
+    "deps": {
+      "components": [],
+      "third_party": []
+    },
+    "build": {
+      "sub_component": []
+    }
+  }
+}

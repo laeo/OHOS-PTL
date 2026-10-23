@@ -1,0 +1,57 @@
+diff --git a/services/bluetooth/stack/src/hci/hdi_wrapper.c b/services/bluetooth/stack/src/hci/hdi_wrapper.c
+index a117505c..fca9e074 100644
+--- a/services/bluetooth/stack/src/hci/hdi_wrapper.c
++++ b/services/bluetooth/stack/src/hci/hdi_wrapper.c
+@@ -16,24 +16,45 @@
+ #include "hdi_wrapper.h"
+ 
+ #include <dlfcn.h>
++#include <stddef.h>
+ 
+ #include "log.h"
+ #include "platform/include/allocator.h"
+ 
+-#ifdef __x86_64__
+-#define HDI_LIB "libbluetooth_hdi_adapter.so"
+-#else
+-#define HDI_LIB "libbluetooth_hdi_adapter.z.so"
+-#endif
++/*
++ * The HDI adapter library name.
++ *
++ * Since OpenHarmony 5.0 every shared library produced by the component build
++ * carries the ".z" infix (build/toolchain/toolchain.gni: shlib_extension =
++ * ".z.so") - on *every* architecture, x86_64 included.  The old
++ * "#ifdef __x86_64__" variant asked for "libbluetooth_hdi_adapter.so", a
++ * file that does not exist in any OHOS image, so on x86_64 the whole
++ * bluetooth host stack failed at HCI_Initialize() with
++ * "Load libbluetooth_hdi_adapter.so failed" and the vendor HAL was never
++ * even dlopen()ed.
++ *
++ * We now try the canonical name first and fall back to the legacy one, so
++ * that both old and new images keep working.
++ */
++static const char *const HDI_LIBS[] = {
++    "libbluetooth_hdi_adapter.z.so",
++    "libbluetooth_hdi_adapter.so",
++};
+ 
+ HDILib *LoadHdiLib()
+ {
+     HDILib *lib = MEM_CALLOC.alloc(sizeof(HDILib));
+     if (lib != NULL) {
+         do {
+-            lib->lib = dlopen(HDI_LIB, RTLD_LAZY | RTLD_NODELETE);
++            for (size_t i = 0; i < sizeof(HDI_LIBS) / sizeof(HDI_LIBS[0]); ++i) {
++                lib->lib = dlopen(HDI_LIBS[i], RTLD_LAZY | RTLD_NODELETE);
++                if (lib->lib != NULL) {
++                    break;
++                }
++                LOG_ERROR("Load %{public}s failed, %{public}s", HDI_LIBS[i], dlerror());
++            }
+             if (lib->lib == NULL) {
+-                LOG_ERROR("Load libbluetooth_hdi_adapter.so failed, %{public}s", dlerror());
++                LOG_ERROR("Load bluetooth hdi adapter failed");
+                 break;
+             }
+ 

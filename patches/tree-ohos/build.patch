@@ -1,0 +1,63 @@
+diff --git a/build_scripts/build.sh b/build_scripts/build.sh
+index c853776b..058893c0 100755
+--- a/build_scripts/build.sh
++++ b/build_scripts/build.sh
+@@ -118,6 +118,10 @@ export PATH=${SOURCE_ROOT_DIR}/prebuilts/build-tools/common/nodejs/node-v${EXPEC
+ export NODE_HOME=${SOURCE_ROOT_DIR}/prebuilts/build-tools/common/nodejs/node-v${EXPECTED_NODE_VERSION}-${NODE_PLATFORM}
+ export PATH=${SOURCE_ROOT_DIR}/prebuilts/build-tools/common/oh-command-line-tools/ohpm/bin:$PATH
+ export PATH=${SOURCE_ROOT_DIR}/prebuilts/tool/command-line-tools/bin:$PATH
++# libtoolize (used by autotools-based third_party deps, e.g. third_party/libtiff)
++# Some hosts don't ship the system `libtool` package; the tree provides a
++# prebuilt copy that must be on PATH.
++export PATH=${SOURCE_ROOT_DIR}/prebuilts/libtool/bin:$PATH
+ chmod +x ${SOURCE_ROOT_DIR}/prebuilts/tool/command-line-tools/hvigor/bin/hvigorw
+ echo "[OHOS INFO] Current Node.js version is $(node -v)"
+ NODE_VERSION=$(node -v)
+diff --git a/config/compiler/BUILD.gn b/config/compiler/BUILD.gn
+index 5a1c1280..14a9cfb0 100755
+--- a/config/compiler/BUILD.gn
++++ b/config/compiler/BUILD.gn
+@@ -175,6 +175,10 @@ config("default_include_dirs") {
+     "${root_out_dir}/override/third_party",
+     "//",
+     root_gen_dir,
++    # x86_64_virt: RS_ENABLE_VK is a global define (graphic_config.gni gpu_defines),
++    # so every target that includes image.h needs the Vulkan headers on the include
++    # path; upstream only wires them onto 2d_graphics via public_external_deps.
++    "//third_party/vulkan-headers/include",
+   ]
+ }
+ 
+@@ -231,6 +235,24 @@ config("compiler") {
+     ":compiler_codegen",
+   ]
+ 
++  # Host-only compatibility shim for newer host toolchains.
++  #
++  # OpenHarmony sources were written against older libstdc++/libc++ releases
++  # whose standard headers provided a broad set of transitive includes. GCC 15
++  # libstdc++ (Ubuntu 26.04) no longer does, so host C++ translation units that
++  # use e.g. std::sort / std::all_of / std::count / std::find without an
++  # explicit #include <algorithm> fail to compile. Force-include one header
++  # that restores the commonly relied-upon includes.
++  #
++  # Scoped to host (linux) toolchains only: target builds use is_ohos and the
++  # bundled libc++, and are deliberately unaffected.
++  if (is_linux && !is_ohos && current_cpu == "x64") {
++    cflags_cc += [
++      "-include",
++      rebase_path("//build/compat/gcc15_std_compat.h", root_build_dir),
++    ]
++  }
++
+   if (is_ohos && is_standard_system && is_clang &&
+       (target_cpu == "arm" || target_cpu == "arm64" ||
+        target_cpu == "riscv64")) {
+@@ -970,6 +992,7 @@ config("default_warnings") {
+         "-Wno-error=int-in-bool-context",
+         "-Wno-error=return-stack-address",
+         "-Wno-error=dangling-gsl",
++        "-Wno-error=incompatible-pointer-types-discards-qualifiers",
+         "-Wno-unused-but-set-variable",
+         "-Wno-deprecated-declarations",
+         "-Wno-unused-but-set-parameter",

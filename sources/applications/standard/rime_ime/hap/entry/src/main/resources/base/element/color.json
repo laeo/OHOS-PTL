@@ -1,0 +1,9 @@
+{
+  "color": [
+    { "name": "start_window_background", "value": "#F2F3F5" },
+    { "name": "preedit_text", "value": "#999999" },
+    { "name": "candidate_text", "value": "#111111" },
+    { "name": "candidate_index", "value": "#007DFF" },
+    { "name": "candidate_bg", "value": "#FFFFFF" }
+  ]
+}

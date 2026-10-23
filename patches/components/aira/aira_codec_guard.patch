@@ -1,0 +1,513 @@
+diff --git a/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets b/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
+index a980c0d..84963dc 100644
+--- a/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
++++ b/AiraBrowser/entry/src/main/ets/app/pages/BrowserShellPage.ets
+@@ -1,6 +1,8 @@
+ import { common } from '@kit.AbilityKit';
+ import { webview } from '@kit.ArkWeb';
+-import { loginComponentManager } from '@kit.AccountKit';
++// [fix_aira_guide] HMS-only LoginComponent is absent on OpenHarmony; use the local
++// drop-in shim so the module link cannot fail. See the shim header for details.
++import { loginComponentManager } from '../../platform/huawei/OpenHarmonyLoginComponentShim';
+ import { BusinessError } from '@kit.BasicServicesKit';
+ import { AiraNavForensicsProbe } from '../../common/debug/AiraNavForensicsProbe';
+ import { curves, FrameCallback, KeyboardAvoidMode, window } from '@kit.ArkUI';
+@@ -111,6 +113,7 @@ import { WebPageShareService } from '../../services/share/WebPageShareService';
+ import { BrowserUserAgentClientHintsService } from '../../services/web/BrowserUserAgentClientHintsService';
+ import { BrowserUserAgentRuntimeService } from '../../services/web/BrowserUserAgentRuntimeService';
+ import { WebScrollSmoothModeService } from '../../services/web/WebScrollSmoothModeService';
++import { handleMediaCodecGuardInterceptRequest } from '../../services/web/WebMediaCodecGuardScriptService';
+ import { BrowserWebBottomSafeAreaCoordinator } from '../../core/browser/BrowserWebBottomSafeAreaCoordinator';
+ import { BrowserWebToolbarClearanceCoordinator } from '../../core/browser/BrowserWebToolbarClearanceCoordinator';
+ import {
+@@ -12094,6 +12097,13 @@ struct BrowserShellPage {
+     if (this.shouldLeaveStreamingRequestToKernel(event.request)) {
+       return null;
+     }
++    // [aira-codec-guard] network layer fallback for the media stream API: the page layer
++    // script already rewrites the parameters, so this only kicks in for requests the page
++    // did not touch (engine issued requests, workers, nested frames).
++    const codecGuardResponse = handleMediaCodecGuardInterceptRequest(event);
++    if (codecGuardResponse !== null) {
++      return codecGuardResponse;
++    }
+     const htmlFileResponse = this.documentViewerService.tryBuildHtmlFileResponse(event.request);
+     if (htmlFileResponse !== null) {
+       return htmlFileResponse;
+diff --git a/AiraBrowser/entry/src/main/ets/core/web/BrowserHostedWebDocumentStartScriptCoordinator.ets b/AiraBrowser/entry/src/main/ets/core/web/BrowserHostedWebDocumentStartScriptCoordinator.ets
+index a0fb30f..0e05c72 100644
+--- a/AiraBrowser/entry/src/main/ets/core/web/BrowserHostedWebDocumentStartScriptCoordinator.ets
++++ b/AiraBrowser/entry/src/main/ets/core/web/BrowserHostedWebDocumentStartScriptCoordinator.ets
+@@ -10,6 +10,7 @@ import { SiteInteractionLogicService } from '../../services/web/SiteInteractionL
+ import { SitePolicyService } from '../../services/web/SitePolicyService';
+ import { WebClipboardPermissionScriptService } from '../../services/web/WebClipboardPermissionScriptService';
+ import { WebMixedContentImageUpgradeScriptService } from '../../services/web/WebMixedContentImageUpgradeScriptService';
++import { WebMediaCodecGuardScriptService, markMediaCodecGuardApplied } from '../../services/web/WebMediaCodecGuardScriptService';
+ import { BrowserWebLocalScrollSignalService } from '../../services/web/BrowserWebLocalScrollSignalService';
+ import { BrowserMediaFrameRuntimeCoordinator } from '../browser/media/BrowserMediaFrameRuntimeCoordinator';
+ import {
+@@ -58,6 +59,8 @@ export class BrowserHostedWebDocumentStartScriptCoordinator
+     new WebBackForwardCacheCoordinator();
+   private readonly mixedContentImageUpgradeScriptService: WebMixedContentImageUpgradeScriptService =
+     new WebMixedContentImageUpgradeScriptService();
++  private readonly mediaCodecGuardScriptService: WebMediaCodecGuardScriptService =
++    new WebMediaCodecGuardScriptService();
+   private readonly localScrollSignalService: BrowserWebLocalScrollSignalService =
+     new BrowserWebLocalScrollSignalService();
+   private readonly mediaFrameRuntimeCoordinator: BrowserMediaFrameRuntimeCoordinator;
+@@ -85,7 +88,7 @@ export class BrowserHostedWebDocumentStartScriptCoordinator
+     const userScriptBundle: UserScriptDocumentStartScriptBundle =
+       this.userScriptRuntimeCoordinator.buildDocumentStartScriptBundle(privateMode);
+     const documentStartScriptKey = [
+-      'browser-document-start-v3',
++      'browser-document-start-v4',
+       'freeze-loaf-9f2a',
+       privateMode ? 'private' : 'regular',
+       tab.profileId,
+@@ -116,11 +119,18 @@ export class BrowserHostedWebDocumentStartScriptCoordinator
+       };
+     }
+     const adBlockScripts = sharedAdBlockDocumentStartScriptProviderRegistry.buildForTab(tab);
++    // [aira-codec-guard] the guard script is really attached to a Web component now
++    markMediaCodecGuardApplied();
+     const browserScripts = [
+       labelInjectedScript(this.backForwardCacheCoordinator.buildCompatibilityDocumentStartScriptItem(),
+         'bfcache-compat'),
+       labelInjectedScript(this.mixedContentImageUpgradeScriptService.buildDocumentStartScriptItem(),
+         'mixed-content-upgrade'),
++      // [aira-codec-guard] The x86_64 ArkWeb engine has no HEVC decoder, so a site that
++      // picks the HEVC DASH track leaves the player with an audio-only stream.  The guard
++      // hides HEVC from the page and rewrites the media API parameters to AVC.
++      labelInjectedScript(this.mediaCodecGuardScriptService.buildDocumentStartScriptItem(),
++        'media-codec-guard'),
+       labelInjectedScript(this.mediaFrameRuntimeCoordinator.buildDocumentStartScriptItem(),
+         'media-frame-runtime'),
+       labelInjectedScript(this.localScrollSignalService.buildDocumentStartScriptItem(),
+diff --git a/AiraBrowser/entry/src/main/ets/services/web/WebMediaCodecGuardScriptService.ets b/AiraBrowser/entry/src/main/ets/services/web/WebMediaCodecGuardScriptService.ets
+new file mode 100644
+index 0000000..ee3556a
+--- /dev/null
++++ b/AiraBrowser/entry/src/main/ets/services/web/WebMediaCodecGuardScriptService.ets
+@@ -0,0 +1,422 @@
++import { http } from '@kit.NetworkKit';
++import { fileIo } from '@kit.CoreFileKit';
++import { hilog } from '@kit.PerformanceAnalysisKit';
++import { AppRuntimeContext } from '../../app/runtime/AppRuntimeContext';
++
++/**
++ * 媒体编解码守卫（HEVC 屏蔽 + 取流参数改写）。
++ *
++ * 背景：当前 x86_64 ArkWeb 引擎（社区 Chromium 114）**没有 HEVC 解码器**
++ * （ffmpeg 无 hevc decoder，M114 连 HEVC 解析器都没编），但站点（bilibili）
++ * 会同时下发 AVC(codecid 7) / HEVC(12) / AV1(13) 三条 DASH 轨，前端若选中
++ * HEVC 则视频轨全废，只剩 AAC 音轨（用户看到的"解码器是 mp4a / HEVC"，
++ * 表现为极卡、缓冲慢、只播一两帧）。
++ *
++ * 本模块提供三层能力（与系统自带浏览器 `com.ohos.browser` 的保护一致）：
++ * 1) 文档起始注入脚本（页面层，最可靠）：
++ *    - 屏蔽 HEVC：`MediaSource.isTypeSupported` / `SourceBuffer.isTypeSupported` /
++ *      `HTMLMediaElement.canPlayType` / `MediaCapabilities.decodingInfo`
++ *      对 hev1/hvc1/h265/hevc 一律返回不支持；
++ *    - 改写取流参数：`fetch` / `XMLHttpRequest.open` 对 bilibili 媒体 API
++ *      （点播 `/playurl`：fnval→16 + prefer_codec_type=1；直播 `getRoomPlayInfo`：
++ *      codec→0、format→2(fmp4)）；
++ *    - 过滤 DASH 响应：删除 HEVC/AV1 轨，强制只留 AVC。
++ * 2) `onInterceptRequest`（网络层）：同规则改写 URL 并回填响应（引擎侧发起的请求）。
++ * 3) 取流参数改写**跳过 WBI 签名请求**（带 `w_rid`）：改参数会破坏签名导致 -403。
++ *
++ * 运行期标记：脚本安装后会在 `window` 上挂 `__airaCodecGuard`（值为版本号），
++ * 同时本模块在应用启动后把版本标记写到应用沙箱
++ * `<filesDir>/media_codec_guard.json`，供 `ohos-diag` 媒体段自动判定。
++ */
++
++/** 守卫版本号（页面脚本标记 + 沙箱标记文件共用） */
++export const MEDIA_CODEC_GUARD_VERSION: string = 'aira-codec-guard-v1';
++
++/** 沙箱标记文件名（写在应用 filesDir 下） */
++export const MEDIA_CODEC_GUARD_MARKER_FILE_NAME: string = 'media_codec_guard.json';
++
++const MEDIA_CODEC_GUARD_LOG_DOMAIN: number = 0xD002000;
++const MEDIA_CODEC_GUARD_LOG_TAG: string = 'AiraCodecGuard';
++
++/** 媒体 API 主机（bilibili 系） */
++const MEDIA_HOST_KEYS: string[] = ['bilibili.com', 'bilibili.cn', 'bilivideo.com', 'bilivideo.cn', 'hdslb.com'];
++
++/** 直播取流 API 路径特征 */
++const LIVE_API_KEY: string = 'getroomplayinfo';
++
++/** 点播取流 API 路径特征 */
++const VOD_API_KEY: string = '/playurl';
++
++/** HEVC 编码标识（命中即视为 HEVC） */
++const HEVC_KEYS: string[] = ['hev1', 'hvc1', 'h265', 'hevc'];
++
++/** 原生取流超时（ms） */
++const FETCH_TIMEOUT_MS: number = 8000;
++
++/** 判断字符串是否含 HEVC 编码标识 */
++export function isHevcCodecText(text: string): boolean {
++  if (text.length === 0) {
++    return false;
++  }
++  const lower: string = text.toLowerCase();
++  for (let i = 0; i < HEVC_KEYS.length; i++) {
++    if (lower.indexOf(HEVC_KEYS[i]) >= 0) {
++      return true;
++    }
++  }
++  return false;
++}
++
++/** 判断 URL 是否属于 bilibili 媒体域 */
++export function isMediaHostUrl(url: string): boolean {
++  const lower: string = url.toLowerCase();
++  for (let i = 0; i < MEDIA_HOST_KEYS.length; i++) {
++    if (lower.indexOf(MEDIA_HOST_KEYS[i]) >= 0) {
++      return true;
++    }
++  }
++  return false;
++}
++
++/** 拆分 URL 为 base / query 段数组 / hash */
++function splitUrl(url: string): string[] {
++  const hashIdx: number = url.indexOf('#');
++  const hash: string = hashIdx >= 0 ? url.substring(hashIdx) : '';
++  const withoutHash: string = hashIdx >= 0 ? url.substring(0, hashIdx) : url;
++  const qIdx: number = withoutHash.indexOf('?');
++  if (qIdx < 0) {
++    return [withoutHash, '', hash];
++  }
++  return [withoutHash.substring(0, qIdx), withoutHash.substring(qIdx + 1), hash];
++}
++
++/** 取 query 段中的参数值，不存在返回 null */
++function getParam(parts: string[], key: string): string | null {
++  for (let i = 0; i < parts.length; i++) {
++    const item: string = parts[i];
++    const eq: number = item.indexOf('=');
++    const name: string = eq >= 0 ? item.substring(0, eq) : item;
++    if (name === key) {
++      return eq >= 0 ? item.substring(eq + 1) : '';
++    }
++  }
++  return null;
++}
++
++/** 写 query 段参数，返回是否发生变化 */
++function setParam(parts: string[], key: string, value: string): boolean {
++  let found: boolean = false;
++  let changed: boolean = false;
++  for (let i = 0; i < parts.length; i++) {
++    const item: string = parts[i];
++    const eq: number = item.indexOf('=');
++    const name: string = eq >= 0 ? item.substring(0, eq) : item;
++    if (name === key) {
++      found = true;
++      if (item !== key + '=' + value) {
++        parts[i] = key + '=' + value;
++        changed = true;
++      }
++      break;
++    }
++  }
++  if (!found) {
++    parts.push(key + '=' + value);
++    changed = true;
++  }
++  return changed;
++}
++
++/**
++ * 媒体 API 取流参数改写（ArkTS 侧，与页面脚本规则一致）。
++ *
++ * - 点播 `/playurl`：`fnval` → 16（只 DASH/AVC 轨），补 `prefer_codec_type=1`（优先 AVC）
++ * - 直播 `getRoomPlayInfo`：`codec` → 0（AVC），`format` → 2（fmp4，Chromium 无 FLV 解封装器）
++ * - 带 `w_rid`（WBI 签名）的请求**跳过**：改参数会破坏签名（服务端 -403）
++ */
++export function rewriteMediaApiUrl(url: string): string {
++  if (url.length === 0 || !isMediaHostUrl(url)) {
++    return url;
++  }
++  const lower: string = url.toLowerCase();
++  const isLive: boolean = lower.indexOf(LIVE_API_KEY) >= 0;
++  const isVod: boolean = lower.indexOf(VOD_API_KEY) >= 0;
++  if (!isLive && !isVod) {
++    return url;
++  }
++  if (lower.indexOf('w_rid=') >= 0) {
++    // WBI 签名请求：任何参数改动都会导致签名校验失败，直接放行
++    return url;
++  }
++  const segs: string[] = splitUrl(url);
++  const parts: string[] = segs[1].length > 0 ? segs[1].split('&') : [];
++  let changed: boolean = false;
++  if (isVod) {
++    const fnval: string | null = getParam(parts, 'fnval');
++    if (fnval !== null && fnval !== '16') {
++      changed = setParam(parts, 'fnval', '16') || changed;
++    }
++    if (getParam(parts, 'prefer_codec_type') === null) {
++      changed = setParam(parts, 'prefer_codec_type', '1') || changed;
++    }
++  }
++  if (isLive) {
++    const codec: string | null = getParam(parts, 'codec');
++    if (codec !== null && codec !== '0') {
++      changed = setParam(parts, 'codec', '0') || changed;
++    }
++    const format: string | null = getParam(parts, 'format');
++    if (format !== null && format !== '2') {
++      changed = setParam(parts, 'format', '2') || changed;
++    }
++  }
++  if (!changed) {
++    return url;
++  }
++  return segs[0] + '?' + parts.join('&') + segs[2];
++}
++
++/** 是否为需要关注的媒体取流请求 */
++export function isMediaApiUrl(url: string): boolean {
++  if (!isMediaHostUrl(url)) {
++    return false;
++  }
++  const lower: string = url.toLowerCase();
++  return lower.indexOf(LIVE_API_KEY) >= 0 || lower.indexOf(VOD_API_KEY) >= 0;
++}
++
++/**
++ * 文档起始注入脚本：
++ * 1) 屏蔽 HEVC（isTypeSupported / canPlayType / decodingInfo）；
++ * 2) 改写媒体取流参数（fetch / XHR.open）；
++ * 3) 过滤 DASH 响应（去掉 HEVC/AV1 轨，只留 AVC）。
++ */
++export function buildMediaCodecGuardScript(): string {
++  return `(function(){try{
++if(window.__airaCodecGuard){return;}
++window.__airaCodecGuard='aira-codec-guard-v1';
++window.__ohBrowserCodecGuard=1;
++var HEVC_KEYS=['hev1','hvc1','h265','hevc'];
++var MEDIA_HOSTS=['bilibili.com','bilibili.cn','bilivideo.com','bilivideo.cn','hdslb.com'];
++var stats={hevcBlocked:0,rewrites:0,signedSkip:0,filtered:0};
++window.__airaCodecGuardStats=stats;
++function isHevc(t){if(typeof t!=='string'){return false;}var s=t.toLowerCase();for(var i=0;i<HEVC_KEYS.length;i++){if(s.indexOf(HEVC_KEYS[i])>=0){return true;}}return false;}
++function patchStaticFn(obj,name,hevcRet){if(!obj||typeof obj[name]!=='function'){return;}var orig=obj[name];try{obj[name]=function(type){if(isHevc(type)){stats.hevcBlocked++;return hevcRet;}return orig.call(this,type);};}catch(e){}}
++function patchProtoFn(proto,name,hevcRet){if(!proto||typeof proto[name]!=='function'){return;}var orig=proto[name];try{proto[name]=function(type){if(isHevc(type)){stats.hevcBlocked++;return hevcRet;}return orig.call(this,type);};}catch(e){}}
++patchStaticFn(window.MediaSource,'isTypeSupported',false);
++patchStaticFn(window.ManagedMediaSource,'isTypeSupported',false);
++patchStaticFn(window.SourceBuffer,'isTypeSupported',false);
++patchStaticFn(window.WebKitMediaSource,'isTypeSupported',false);
++patchStaticFn(window.MediaSource&&window.MediaSource.prototype,'isTypeSupported',false);
++patchStaticFn(window.SourceBuffer&&window.SourceBuffer.prototype,'isTypeSupported',false);
++patchProtoFn(window.HTMLMediaElement&&window.HTMLMediaElement.prototype,'canPlayType','');
++patchProtoFn(window.HTMLVideoElement&&window.HTMLVideoElement.prototype,'canPlayType','');
++patchProtoFn(window.HTMLAudioElement&&window.HTMLAudioElement.prototype,'canPlayType','');
++try{if(navigator.mediaCapabilities&&typeof navigator.mediaCapabilities.decodingInfo==='function'){var origDec=navigator.mediaCapabilities.decodingInfo;navigator.mediaCapabilities.decodingInfo=function(cfg){try{if(cfg&&isHevc(String(cfg.type||''))){stats.hevcBlocked++;return Promise.resolve({supported:false,smooth:false,powerEfficient:false});}}catch(e){}return origDec.call(this,cfg);};}}catch(e){}
++function isMediaHost(u){var l=String(u).toLowerCase();for(var i=0;i<MEDIA_HOSTS.length;i++){if(l.indexOf(MEDIA_HOSTS[i])>=0){return true;}}try{var h=new URL(u,location.href).hostname.toLowerCase();for(var j=0;j<MEDIA_HOSTS.length;j++){if(h.indexOf(MEDIA_HOSTS[j])>=0){return true;}}}catch(e){}return false;}
++function getParam(parts,key){for(var i=0;i<parts.length;i++){var it=parts[i];var eq=it.indexOf('=');var nm=eq>=0?it.substring(0,eq):it;if(nm===key){return eq>=0?it.substring(eq+1):'';}}return null;}
++function setParam(parts,key,value){var found=false;var changed=false;for(var i=0;i<parts.length;i++){var it=parts[i];var eq=it.indexOf('=');var nm=eq>=0?it.substring(0,eq):it;if(nm===key){found=true;if(it!==key+'='+value){parts[i]=key+'='+value;changed=true;}break;}}if(!found){parts.push(key+'='+value);changed=true;}return changed;}
++function rewriteUrl(u){if(typeof u!=='string'||u.length===0){return u;}if(!isMediaHost(u)){return u;}var low=u.toLowerCase();var isLive=low.indexOf('getroomplayinfo')>=0;var isVod=low.indexOf('/playurl')>=0;if(!isLive&&!isVod){return u;}if(low.indexOf('w_rid=')>=0){stats.signedSkip++;return u;}var hashIdx=u.indexOf('#');var hash=hashIdx>=0?u.substring(hashIdx):'';var noHash=hashIdx>=0?u.substring(0,hashIdx):u;var qIdx=noHash.indexOf('?');if(qIdx<0){return u;}var base=noHash.substring(0,qIdx);var query=noHash.substring(qIdx+1);var parts=query.length>0?query.split('&'):[];var changed=false;if(isVod){var fnval=getParam(parts,'fnval');if(fnval!==null&&fnval!=='16'){changed=setParam(parts,'fnval','16')||changed;}if(getParam(parts,'prefer_codec_type')===null){changed=setParam(parts,'prefer_codec_type','1')||changed;}}if(isLive){var codec=getParam(parts,'codec');if(codec!==null&&codec!=='0'){changed=setParam(parts,'codec','0')||changed;}var fmt=getParam(parts,'format');if(fmt!==null&&fmt!=='2'){changed=setParam(parts,'format','2')||changed;}}if(!changed){return u;}stats.rewrites++;return base+'?'+parts.join('&')+hash;}
++function isHevcRep(v){if(!v||typeof v!=='object'){return false;}if(typeof v.codecid==='number'){return v.codecid===12;}if(typeof v.codecs==='string'){return isHevc(v.codecs);}return false;}
++function isAvcRep(v){if(!v||typeof v!=='object'){return false;}if(typeof v.codecid==='number'){return v.codecid===7;}if(typeof v.codecs==='string'){return v.codecs.toLowerCase().indexOf('avc1')>=0;}return false;}
++function filterVideoList(list){if(!list||!list.length){return null;}var avc=[];var keep=[];for(var i=0;i<list.length;i++){var v=list[i];if(isHevcRep(v)){continue;}if(isAvcRep(v)){avc.push(v);}else{keep.push(v);}}if(avc.length>0){return avc;}return keep.length>0?keep:null;}
++function filterDashJson(obj){if(!obj||typeof obj!=='object'){return false;}var changed=false;var data=obj.data;if(!data||typeof data!=='object'){return false;}var dash=data.dash;if(dash&&typeof dash==='object'&&dash.video&&dash.video.length){var kept=filterVideoList(dash.video);if(kept&&kept.length!==dash.video.length){dash.video=kept;changed=true;}}if(data.support_formats&&data.support_formats.length){var keptF=[];var hasAvc=false;for(var j=0;j<data.support_formats.length;j++){var f=data.support_formats[j];if(isHevcRep(f)){changed=true;continue;}if(isAvcRep(f)){hasAvc=true;}keptF.push(f);}if(hasAvc){var keptF2=[];for(var k=0;k<keptF.length;k++){var f2=keptF[k];if(!isAvcRep(f2)&&f2&&typeof f2.codecid==='number'&&f2.codecid===13){changed=true;continue;}keptF2.push(f2);}keptF=keptF2;}if(keptF.length!==data.support_formats.length){data.support_formats=keptF;}}
++return changed;}
++function filterJsonText(txt){if(typeof txt!=='string'||txt.length===0){return txt;}if(txt.indexOf('"dash"')<0){return txt;}var obj=null;try{obj=JSON.parse(txt);}catch(e){return txt;}if(!filterDashJson(obj)){return txt;}stats.filtered++;try{return JSON.stringify(obj);}catch(e){return txt;}}
++function filtRes(p){try{return p.then(function(res){try{if(!res||!res.headers){return res;}var ct='';try{ct=res.headers.get('content-type')||'';}catch(e){}if(ct.indexOf('json')<0){return res;}return res.clone().text().then(function(txt){if(txt.indexOf('"dash"')<0){return res;}var obj=null;try{obj=JSON.parse(txt);}catch(e){return res;}if(!filterDashJson(obj)){return res;}stats.filtered++;var body=JSON.stringify(obj);var headers=new Headers();try{res.headers.forEach(function(v,k){headers.set(k,v);});}catch(e){}try{headers.set('content-length',String(body.length));}catch(e){}return new Response(body,{status:res.status,statusText:res.statusText,headers:headers});}).catch(function(){return res;});}catch(e){return res;}});}catch(e){return p;}}
++if(typeof window.fetch==='function'){var origFetch=window.fetch;window.fetch=function(input,init){var url=null;try{if(typeof input==='string'){url=input;}else if(input&&typeof input.url==='string'){url=input.url;}else if(input&&typeof input.href==='string'){url=input.href;}}catch(e){}
++var self=this;var origInput=input;var rewritten=false;if(url){var nu=rewriteUrl(url);if(nu!==url){rewritten=true;try{if(typeof input==='string'){return filtRes(origFetch.call(self,nu,init)).catch(function(){return filtRes(origFetch.call(self,origInput,init));});}input=new Request(nu,input);}catch(e2){rewritten=false;}}}
++var pr=filtRes(origFetch.call(self,input,init));if(rewritten){return pr.catch(function(){return filtRes(origFetch.call(self,origInput,init));});}return pr;}}
++if(typeof XMLHttpRequest!=='undefined'&&XMLHttpRequest.prototype){var XO=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(method,url){var args=Array.prototype.slice.call(arguments);var orig=args[1];try{if(typeof args[1]==='string'){args[1]=rewriteUrl(args[1]);}}catch(e){}try{return XO.apply(this,args);}catch(e2){args[1]=orig;return XO.apply(this,args);}};
++var td=Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype,'responseText');if(td&&td.get){Object.defineProperty(XMLHttpRequest.prototype,'responseText',{configurable:true,enumerable:false,get:function(){var txt=td.get.call(this);try{if(this.responseType===''||this.responseType==='text'){return filterJsonText(txt);}}catch(e){}return txt;}});}
++var rd=Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype,'response');if(rd&&rd.get){Object.defineProperty(XMLHttpRequest.prototype,'response',{configurable:true,enumerable:false,get:function(){var val=rd.get.call(this);try{if(this.responseType==='json'&&val&&typeof val==='object'){if(filterDashJson(val)){stats.filtered++;}}}catch(e){}return val;}});}}
++window.__airaCodecGuardProbe=function(t){var v=document.createElement('video');return {guard:window.__airaCodecGuard,hevc:isHevc(t),ms:(window.MediaSource?window.MediaSource.isTypeSupported(t):'n/a'),cpt:(v?v.canPlayType(t):'n/a'),stats:stats};};
++}catch(e){}})();`
++}
++
++/** 原生取流结果 */
++interface MediaFetchResult {
++  code: number
++  body: string
++  mime: string
++  header: Header[]
++}
++
++/** 用原生 http 拉取改写后的媒体 API */
++async function fetchMediaApi(url: string, request: WebResourceRequest): Promise<MediaFetchResult> {
++  const header: Record<string, string> = {};
++  try {
++    const reqHeaders: Header[] = request.getRequestHeader();
++    for (const item of reqHeaders) {
++      const key: string = item.headerKey.toLowerCase();
++      if (key === 'host' || key === 'connection' || key === 'content-length' ||
++        key === 'accept-encoding' || key === 'origin' || key === 'referer') {
++        continue;
++      }
++      header[item.headerKey] = item.headerValue;
++    }
++  } catch (error) {
++    hilog.warn(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'read request header failed: %{public}s', `${error}`);
++  }
++  header['Accept-Encoding'] = 'identity';
++  const httpRequest = http.createHttp();
++  try {
++    const res = await httpRequest.request(url, {
++      method: http.RequestMethod.GET,
++      header: header,
++      readTimeout: FETCH_TIMEOUT_MS,
++      connectTimeout: FETCH_TIMEOUT_MS,
++      expectDataType: http.HttpDataType.STRING
++    });
++    const respHeader: Header[] = [];
++    let mime: string = 'application/json';
++    const rawHeader: Record<string, string> = res.header as Record<string, string>;
++    const keys: string[] = Object.keys(rawHeader);
++    for (const key of keys) {
++      const lower: string = key.toLowerCase();
++      if (lower === 'content-encoding' || lower === 'content-length' || lower === 'transfer-encoding') {
++        continue;
++      }
++      if (lower === 'content-type') {
++        mime = rawHeader[key];
++      }
++      respHeader.push({ headerKey: key, headerValue: rawHeader[key] });
++    }
++    const body: string = typeof res.result === 'string' ? res.result : JSON.stringify(res.result);
++    return { code: res.responseCode, body: body, mime: mime, header: respHeader };
++  } finally {
++    try {
++      httpRequest.destroy();
++    } catch (error) {
++      // 忽略销毁异常
++    }
++  }
++}
++
++/**
++ * `onInterceptRequest` 回调：网络层改写媒体取流参数。
++ *
++ * 说明：ArkWeb 的 `onInterceptRequest` **不能直接改写请求 URL**（回调只给只读的
++ * `WebResourceRequest`），因此这里对需要改写的请求改用原生 http 拉取改写后的 URL
++ * 并把响应回填给 WebView。页面层脚本已先行改写的请求不会走到这条路径
++ * （此时 URL 已是目标形态，直接放行，由 WebView 正常加载，保留 Cookie 等上下文）。
++ */
++export function handleMediaCodecGuardInterceptRequest(event: OnInterceptRequestEvent): WebResourceResponse | null {
++  const request: WebResourceRequest = event?.request;
++  if (!request) {
++    return null;
++  }
++  let url: string = '';
++  try {
++    url = request.getRequestUrl();
++  } catch (error) {
++    return null;
++  }
++  if (!isMediaApiUrl(url)) {
++    return null;
++  }
++  const rewritten: string = rewriteMediaApiUrl(url);
++  if (rewritten === url) {
++    hilog.info(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'intercept pass url=%{public}s', url.slice(0, 140));
++    return null;
++  }
++  hilog.info(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++    'intercept rewrite url=%{public}s -> %{public}s', url.slice(0, 140), rewritten.slice(0, 140));
++  const response: WebResourceResponse = new WebResourceResponse();
++  response.setResponseIsReady(false);
++  response.setResponseCode(200);
++  response.setReasonMessage('OK');
++  response.setResponseEncoding('utf-8');
++  response.setResponseMimeType('application/json');
++  fetchMediaApi(rewritten, request).then((result: MediaFetchResult) => {
++    response.setResponseCode(result.code);
++    response.setResponseMimeType(result.mime);
++    response.setResponseData(result.body);
++    if (result.header.length > 0) {
++      response.setResponseHeader(result.header);
++    }
++    response.setResponseIsReady(true);
++    hilog.info(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'intercept filled code=%{public}d bytes=%{public}d', result.code, result.body.length);
++  }).catch((error: Error) => {
++    hilog.error(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'intercept fetch failed: %{public}s', error?.message ?? 'unknown');
++    response.setResponseCode(502);
++    response.setResponseData('{"code":-1,"message":"codec guard fetch failed"}');
++    response.setResponseIsReady(true);
++  });
++  return response;
++}
++
++/**
++ * 媒体编解码守卫服务。
++ *
++ * - 页面层：把守卫脚本挂进每个 Web 组件的 `runJavaScriptOnDocumentStart`。
++ * - 网络层：`onInterceptRequest` 里对媒体取流 API 做参数改写兜底。
++ */
++export class WebMediaCodecGuardScriptService {
++  buildDocumentStartScriptItem(): ScriptItem {
++    const script: string = buildMediaCodecGuardScript();
++    if (script.indexOf(MEDIA_CODEC_GUARD_VERSION) < 0) {
++      // 脚本里的版本号是字面量（为了能在 HAP 的 abc 里被静态检出），
++      // 这里做一次运行期自检，防止两边漂移。
++      hilog.error(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++        'guard version mismatch: script does not carry %{public}s', MEDIA_CODEC_GUARD_VERSION);
++    }
++    return {
++      script: script,
++      scriptRules: ['*']
++    };
++  }
++}
++
++let runtimeMarkerWritten: boolean = false;
++
++/**
++ * 运行期标记：守卫脚本真正被挂到某个 Web 组件上时，在应用沙箱里写一份标记文件。
++ *
++ * 目的：让 `ohos-diag` 的媒体段能自动判定"这台机器上的 Aira 是否带 HEVC 屏蔽保护"，
++ * 而不用去解 HAP 里的 abc。文件内容是版本号 + 时间戳。
++ */
++export function markMediaCodecGuardApplied(): void {
++  if (runtimeMarkerWritten) {
++    return;
++  }
++  try {
++    const context = AppRuntimeContext.getApplicationContext();
++    const path = `${context.filesDir}/${MEDIA_CODEC_GUARD_MARKER_FILE_NAME}`;
++    const payload = JSON.stringify({
++      guard: MEDIA_CODEC_GUARD_VERSION,
++      appliedAt: Date.now()
++    });
++    const file = fileIo.openSync(
++      path,
++      fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC
++    );
++    try {
++      const bytes = new Uint8Array(bufferFromString(payload));
++      fileIo.writeSync(file.fd, bytes.buffer);
++      fileIo.fsyncSync(file.fd);
++    } finally {
++      fileIo.closeSync(file);
++    }
++    hilog.info(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'runtime marker written path=%{public}s version=%{public}s', path, MEDIA_CODEC_GUARD_VERSION);
++    runtimeMarkerWritten = true;
++  } catch (error) {
++    hilog.warn(MEDIA_CODEC_GUARD_LOG_DOMAIN, MEDIA_CODEC_GUARD_LOG_TAG,
++      'runtime marker write failed: %{public}s', `${error}`);
++  }
++}
++
++/** UTF-8 字符串 -> ArrayBuffer */
++function bufferFromString(text: string): ArrayBuffer {
++  const bytes = new ArrayBuffer(text.length);
++  const view = new Uint8Array(bytes);
++  for (let i = 0; i < text.length; i++) {
++    view[i] = text.charCodeAt(i) & 0xFF;
++  }
++  return bytes;
++}

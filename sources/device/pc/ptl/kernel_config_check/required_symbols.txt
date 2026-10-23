@@ -1,0 +1,49 @@
+# Required kernel config symbols for the Intel Panther Lake (PTL) real
+# hardware (HONOR XWC-P, Core Ultra X7 358H) OHOS port (product pc_ptl,
+# kernel linux-7.2, defconfig ptl_standard_defconfig).
+#
+# Format: CONFIG_<NAME>=<expected value>   (value is y, m, a number or a string)
+# Lines starting with '#' and blank lines are ignored.
+#
+# Why: `olddefconfig` silently drops symbols that are not "visible" (no prompt)
+# and cannot be satisfied by a select/choice/default.  This file is the
+# authoritative contract; check_defconfig.py fails the build when any of these
+# is missing or has a different value in the generated .config.
+#
+# Touchpad / input (ACPI touchpad TOPS0102 on DesignWare I2C, GpioInt on
+# INTC10BC pin controller):
+CONFIG_PINCTRL_INTEL_PLATFORM=y
+CONFIG_PINCTRL_INTEL=y
+CONFIG_GPIOLIB=y
+CONFIG_MFD_INTEL_LPSS=y
+CONFIG_MFD_INTEL_LPSS_PCI=y
+CONFIG_MFD_INTEL_LPSS_ACPI=y
+CONFIG_I2C_DESIGNWARE_PLATFORM=y
+CONFIG_I2C_DESIGNWARE_PCI=y
+CONFIG_I2C_I801=y
+CONFIG_I2C_HID=y
+CONFIG_I2C_HID_ACPI=y
+CONFIG_HID_MULTITOUCH=y
+
+# Display / GPU (Xe for Arc B390; display support only exists when DRM_XE=m,
+# modules are built+staged by out/.../fix_xehpd/build_modules_and_stage.sh):
+CONFIG_DRM_XE=m
+CONFIG_DRM_XE_DISPLAY=y
+CONFIG_DRM_SIMPLEDRM=y
+CONFIG_SYSFB_SIMPLEFB=y
+
+# Wi-Fi / Bluetooth (Intel CNVi, iwlwifi + btintel_pcie):
+CONFIG_IWLWIFI=y
+CONFIG_IWLMVM=y
+CONFIG_BT_INTEL_PCIE=y
+
+# Storage / USB / audio:
+CONFIG_BLK_DEV_NVME=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PCI=y
+CONFIG_SND_SOC_SOF_PANTHERLAKE=y
+
+# Thermal / EFI variables (must be =y: the OHOS linux_kernel target only
+# builds bzImage, so =m would never be built or installed automatically):
+CONFIG_X86_PKG_TEMP_THERMAL=y
+CONFIG_EFIVAR_FS=y

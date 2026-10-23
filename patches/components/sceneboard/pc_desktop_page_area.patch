@@ -1,0 +1,1453 @@
+--- a/feature/desktop/pagedesktop/src/main/ets/default/common/components/SwiperPage.ets
++++ b/feature/desktop/pagedesktop/src/main/ets/default/common/components/SwiperPage.ets
+@@ -285,6 +285,8 @@
+   @StorageLink('isInGlobalSearchAnimate') isInGlobalSearchAnimate: boolean = false;
+   @State @Watch('onAppListInfoChange') mAppListInfo: GridLayoutItemInfo[] = [];
+   private latestClickedItem: string = '';
++  // fix_desktop2: 桌面图标数量的周期性自证日志（hilog 环形缓冲会把开机日志冲掉）
++  private desktopIconLogTimer: number = -1;
+   private mSwiperPageVM: SwiperPageVM = SwiperPageVM.getInstance();
+   private mPageDesktopViewModel: PageDesktopViewModel = PageDesktopViewModel.getInstance(this.singleContext);
+   private mPageDesktopStyleConfig: PageDesktopGridStyleConfig = this.mPageDesktopViewModel.getPageDesktopStyleConfig();
+@@ -634,6 +636,57 @@
+   private filterItemExceedCurrentScreen(): void {
+     if (this.isPc && this.mAppListInfo) {
+       this.mAppListInfo = this.mPageDesktopViewModel.filterItemExceedCurrentScreen(this.mAppListInfo);
++      // fix_desktop2: 桌面页真正渲染出来的图标数量（自证用）
++      const gridConfig: GridLayoutConfig = this.mPageDesktopViewModel.getGridConfig();
++      log.showInfo(`DESKTOPICONS page=%{public}d rendered=%{public}d grid=%{public}dx%{public}d`,
++        this.indexInSwiper, this.mAppListInfo.length, gridConfig?.row as number, gridConfig?.column as number);
++      AppStorage.setOrCreate('desktopIconRendered', this.mAppListInfo.length);
++    }
++  }
++
++  /**
++   * fix_desktop2: 桌面页自证日志。
++   *
++   * 桌面页真正的渲染源是 mAppListInfo（ForEach 的数据源），所以
++   *   rendered = mAppListInfo.length  —— 页面上真正会有多少个图标
++   *   areaOk  —— 其中 area(width/height) 合法的个数
++   *   list    —— 过滤前拿到的条目数
++   *
++   * 之前桌面一个图标都不显示的根因：预置 layoutInfo.json 的条目没有 "area"，
++   * 落库后 width/height 为 NULL -> 读回 area=[NaN,NaN] -> 图标中心坐标是 NaN，
++   * ArkUI 无法摆放 -> RS 里连节点都没有。这里周期性打印，真机一条 hilog 即可判定。
++   */
++  private logDesktopIconCount(reason: string): void {
++    try {
++      const gridConfig: GridLayoutConfig = this.mPageDesktopViewModel.getGridConfig();
++      let areaOk: number = 0;
++      for (const item of this.mAppListInfo ?? []) {
++        const area: number[] | undefined = item?.area;
++        if (area && area.length === 2 && Number.isFinite(area[0]) && Number.isFinite(area[1])) {
++          areaOk++;
++        }
++      }
++      log.showWarn(`DESKTOPICONS page=%{public}d list=%{public}d rendered=%{public}d areaOk=%{public}d ` +
++        `grid=%{public}dx%{public}d reason=%{public}s`,
++        this.indexInSwiper, this.mAppListInfo?.length ?? 0, this.mAppListInfo?.length ?? 0, areaOk,
++        gridConfig?.row as number, gridConfig?.column as number, reason);
++      AppStorage.setOrCreate('desktopIconRendered', this.mAppListInfo?.length ?? 0);
++    } catch (err) {
++      log.showError(`logDesktopIconCount err: ${err?.code} ${err?.message}`);
++    }
++  }
++
++  private startDesktopIconLog(): void {
++    this.stopDesktopIconLog();
++    this.desktopIconLogTimer = setInterval(() => {
++      this.logDesktopIconCount('timer');
++    }, 30000);
++  }
++
++  private stopDesktopIconLog(): void {
++    if (this.desktopIconLogTimer !== -1) {
++      clearInterval(this.desktopIconLogTimer);
++      this.desktopIconLogTimer = -1;
+     }
+   }
+ 
+@@ -734,6 +787,10 @@
+       });
+     }
+     this.mAppListInfo = appListInfo ?? [];
++    // fix_desktop2: 桌面页这一页拿到的图标数量（自证判据用）
++    log.showInfo(`DESKTOPICONS page=%{public}d list=%{public}d rendered=%{public}d source=appGridInfo`,
++      this.indexInSwiper, this.mAppListInfo.length, this.mAppListInfo.length);
++    AppStorage.setOrCreate('desktopIconListCount', this.mAppListInfo.length);
+   }
+ 
+   public uninstallApp(uninstallBundleName: string, appIndex?: number, shortcutId?: string): void {
+@@ -975,6 +1032,9 @@
+     }
+     this.registerEventHub();
+     this.appListInfoChange();
++    // fix_desktop2: 启动桌面图标数量的周期性自证日志
++    this.logDesktopIconCount('aboutToAppear');
++    this.startDesktopIconLog();
+     this.initLoadSwiperPageCall();
+     this.registerScreenIdChange();
+     this.mIsGameEngineValid = HiSysEventUtil.isGameEngineValid();
+@@ -1363,6 +1423,8 @@
+ 
+   aboutToDisappear(): void {
+     log.showInfo(`aboutToDisappear, this.indexInSwiper: ${this.indexInSwiper}`);
++    // fix_desktop2: 停止周期性自证日志
++    this.stopDesktopIconLog();
+     if (this.isPhone) {
+       SCBSceneSessionManager.getInstance().unregisterUnlockTransitionCallback(this.unLockTransitionController);
+     }
+--- a/feature/desktop/pagedesktop/src/main/ets/default/common/viewmodel/PageDesktopViewModel.ets
++++ b/feature/desktop/pagedesktop/src/main/ets/default/common/viewmodel/PageDesktopViewModel.ets
+@@ -6589,19 +6589,41 @@
+       const maxColumn: number = mGridConfig?.column as number;
+       const maxRow: number = mGridConfig?.row as number;
+       log.showInfo(TAG, `filterItemExceedCurrentScreen item is: max column: ${maxColumn}, max row: ${maxRow}`);
+-      return gridItems.filter((item: GridLayoutItemInfo) => {
+-        if (!item || item.row === undefined || item.column === undefined || !item.area) {
++      let dropped: number = 0;
++      let areaFixed: number = 0;
++      const kept: GridLayoutItemInfo[] = gridItems.filter((item: GridLayoutItemInfo) => {
++        if (!item || item.row === undefined || item.column === undefined) {
+           log.showWarn(TAG, 'filterItemExceedCurrentScreen item undefined');
++          dropped++;
+           return false;
+         }
+-        const rowInGrid: boolean = item.row >= 0 && ((item.row + item.area[1] - 1) < maxRow);
+-        const columnInGrid: boolean = item.column >= 0 && ((item.column + item.area[0] - 1) < maxColumn);
++        // fix_desktop2: area 缺失或非法(NaN)时按 1x1 处理。
++        // 旧逻辑直接 return false（丢弃该项），而 area=NaN 的来源是预置 layoutInfo.json
++        // 没有 area 字段 -> 落库 width/height 为 NULL -> 读回 area=[NaN,NaN]，
++        // 结果桌面所有图标被整批过滤掉（应用中心/dock 因为带 area 所以正常）。
++        let areaWidth: number = 1;
++        let areaHeight: number = 1;
++        if (item.area && item.area.length === 2 &&
++          Number.isFinite(item.area[0]) && Number.isFinite(item.area[1])) {
++          areaWidth = item.area[0];
++          areaHeight = item.area[1];
++        } else {
++          log.showWarn(TAG, `filterItemExceedCurrentScreen invalid area, fallback to 1x1, id: ${item.infoId}`);
++          item.area = [areaWidth, areaHeight];
++          areaFixed++;
++        }
++        const rowInGrid: boolean = item.row >= 0 && ((item.row + areaHeight - 1) < maxRow);
++        const columnInGrid: boolean = item.column >= 0 && ((item.column + areaWidth - 1) < maxColumn);
+         if (!rowInGrid || !columnInGrid) {
++          dropped++;
+           log.showWarn(TAG,
+             `item: ${item.infoId}, ${item.typeId}, column ${item.column}, row ${item.row}, area:${JSON.stringify(item.area)}`);
+         }
+         return rowInGrid && columnInGrid;
+       });
++      log.showInfo(TAG, `DESKTOPFILTER: kept=%{public}d dropped=%{public}d areaFixed=%{public}d maxCol=%{public}d maxRow=%{public}d`,
++        kept.length, dropped, areaFixed, maxColumn, maxRow);
++      return kept;
+     }
+     return gridItems;
+   }
+--- a/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets
++++ b/product/pcbase/src/main/ets/common/PcPageDesktopLayoutConfig.ets
+@@ -183,6 +183,15 @@
+       log.showInfo(TAG, 'loadPersistConfig from ccm, total num = %{public}d', defaultConfig.layoutInfo?.length);
+     }
+     this.mGridLayoutInfo = defaultConfig;
++    // fix_desktop2: 桌面项的 area(width/height) 归一化。
++    // 预置 layoutInfo.json 的条目没有 area 字段 -> 落库时 width/height 为 NULL ->
++    // 读回来 area=[NaN,NaN] -> PageDesktopViewModel.filterItemExceedCurrentScreen()
++    // 用 area 做边界比较全部为 false -> 桌面一个图标都不显示（应用中心/dock 不受影响，
++    // 因为它们的 layoutInfo 带 area）。
++    const areaFixed: number = this.normalizeDesktopItemArea(this.mGridLayoutInfo.layoutInfo);
++    if (areaFixed > 0) {
++      await this.persistDesktopItemArea(this.mGridLayoutInfo.layoutInfo);
++    }
+     this.updateGridConfig(this.mGridLayoutInfo);
+     this.filterNotSupportData(this.mGridLayoutInfo);
+     // fix_desktop_layout: 桌面页必须有可见的 app 图标（RDB 空 / 预置为空 / 全部越界 / 宫格异常）。
+@@ -193,9 +202,58 @@
+     IconResourceManager.getInstance().checkSystemStateAndVersion();
+     this.initLayoutCache();
+     localEventManager.sendLocalEvent(EventConstants.EVENT_LAYOUT_INIT_FINISHED, null);
++    log.showInfo(TAG, 'DESKTOPLAYOUT: loadPersistConfig end, table=%{public}s total=%{public}d desktop=%{public}d',
++      RdbStoreManager.getInstance().getLayoutInfoTableName(),
++      this.mGridLayoutInfo.layoutInfo?.length ?? 0, this.countDesktopItems());
+     log.showInfo(TAG, 'loadPersistConfig end');
+   }
+ 
++  /**
++   * fix_desktop2: 统计桌面(container = CONTAINER_DESKTOP)的 app 图标数量。
++   */
++  private countDesktopItems(): number {
++    const items: GridLayoutItemInfo[] = this.mGridLayoutInfo?.layoutInfo ?? [];
++    let count: number = 0;
++    for (const item of items) {
++      if (item && item.container === CommonConstants.CONTAINER_DESKTOP &&
++        item.typeId === CommonConstants.TYPE_APP) {
++        count++;
++      }
++    }
++    return count;
++  }
++
++  /**
++   * fix_desktop2: PC 产品的桌面布局可能落在两张表上：
++   *   gridlayout_info         —— 默认布局表
++   *   pc_mode_gridlayout_info —— PC_MODE_MODEL 模式下 DesktopDataLoader 实际读写的表
++   * 两张表都要修，否则桌面实际读的那张表里 width/height 仍然是 NULL。
++   */
++  protected async persistDesktopItemArea(items: GridLayoutItemInfo[]): Promise<void> {
++    await super.persistDesktopItemArea(items);
++    try {
++      const rdb: RdbStoreManager = RdbStoreManager.getInstance();
++      const current: string = rdb.getLayoutInfoTableName();
++      const pcTable: string = rdbStoreConfig.pc_mode_gridLayoutInfo.tableName;
++      if (current === pcTable) {
++        return;
++      }
++      const desktopItems: GridLayoutItemInfo[] = (items ?? []).filter(
++        (item: GridLayoutItemInfo) => item && item.container === CommonConstants.CONTAINER_DESKTOP &&
++          item.typeId === CommonConstants.TYPE_APP);
++      if (CheckEmptyUtils.isEmptyArr(desktopItems)) {
++        return;
++      }
++      rdb.updateLayoutTableNameByName(pcTable);
++      const ok: boolean = await rdb.updateInfoPosition(desktopItems, 'fixDesktopItemAreaPcMode');
++      log.showWarn(TAG, 'DESKTOPLAYOUT: persistDesktopItemArea(%{public}s) count=%{public}d ok=%{public}s',
++        pcTable, desktopItems.length, ok);
++      rdb.updateLayoutTableNameByName(current);
++    } catch (err) {
++      log.showError(TAG, `persistDesktopItemArea(pc mode) err: ${err?.code} ${err?.message}`);
++    }
++  }
++
+   public async refreshLayoutAfterRecover(): Promise<void> {
+     GlobalContext.getInstance().setObject('backupStatus', true);
+     const pageCount: number = await globalThis.RdbStoreManagerInstance.querySettingsPageCount();
+@@ -268,6 +326,11 @@
+     if (!item || item.typeId !== CommonConstants.TYPE_APP) {
+       return false;
+     }
++    // fix_desktop2: area 非法(缺失/NaN)的元素实际上渲染不出来，不能算“可见”
++    if (!item.area || item.area.length !== 2 ||
++      !Number.isFinite(item.area[0]) || !Number.isFinite(item.area[1])) {
++      return false;
++    }
+     if (item.page !== undefined && item.page > 0) {
+       return false;
+     }
+@@ -280,6 +343,75 @@
+   }
+ 
+   /**
++   * fix_desktop2: 判断元素是否落在当前宫格内（只看坐标，不看 area）。
++   */
++  private isItemInGrid(item: GridLayoutItemInfo, rows: number, columns: number): boolean {
++    if (!item) {
++      return false;
++    }
++    if (item.page !== undefined && item.page !== null && item.page > 0) {
++      // 在第 2 页及以后：不属于“当前屏越界”，由用户自己分页
++      return true;
++    }
++    const row: number = item.row ?? -1;
++    const column: number = item.column ?? -1;
++    if (row < 0 || column < 0 || row >= rows || column >= columns) {
++      return false;
++    }
++    return true;
++  }
++
++  /**
++   * fix_desktop2: 把落在当前宫格之外的桌面项挪到空闲格子里。
++   *
++   * 真机（3072x1920）与 QEMU（1280x800）的宫格大小不同：预置布局是按某个
++   * 固定宫格（例如 10x19）写死坐标的，屏幕一变小就有一部分图标落到屏幕外，
++   * 页面上看不到。这里只挪“越界”的那部分，已经在格内的保持原位，
++   * 并且用 updateInfoPosition 原地更新（按 bundleName+appIndex），不新增行。
++   * 返回被挪动的条目数。
++   */
++  private repositionOutOfGridItems(items: GridLayoutItemInfo[], grid: GridSize): number {
++    const occupied: Set<string> = new Set<string>();
++    const outOfGrid: GridLayoutItemInfo[] = [];
++    for (const item of items) {
++      if (!this.isItemInGrid(item, grid.rows, grid.columns)) {
++        outOfGrid.push(item);
++        continue;
++      }
++      occupied.add(`${item.row ?? -1}_${item.column ?? -1}`);
++    }
++    if (outOfGrid.length === 0) {
++      return 0;
++    }
++    let moved: number = 0;
++    for (const item of outOfGrid) {
++      let placed: boolean = false;
++      for (let row = 0; row < grid.rows && !placed; row++) {
++        for (let column = 0; column < grid.columns && !placed; column++) {
++          const key: string = `${row}_${column}`;
++          if (occupied.has(key)) {
++            continue;
++          }
++          occupied.add(key);
++          item.row = row;
++          item.column = column;
++          item.page = 0;
++          if (!item.area || item.area.length !== 2 ||
++            !Number.isFinite(item.area[0]) || !Number.isFinite(item.area[1])) {
++            item.area = [1, 1];
++          }
++          placed = true;
++          moved++;
++        }
++      }
++      if (!placed) {
++        log.showWarn(TAG, 'repositionOutOfGridItems: no free cell for %{public}s', item.bundleName);
++      }
++    }
++    return moved;
++  }
++
++  /**
+    * fix_desktop_layout: 保证 PC 桌面页一定有可见的 app 图标。
+    *
+    * 触发场景：
+@@ -288,10 +420,11 @@
+    *   3) 桌面项全部越界（宫格尺寸异常、屏幕尺寸变化后旧坐标失效）；
+    *   4) 宫格行列为 0（屏幕信息未就绪）。
+    *
+-   * 处理方式（两种情况分开处理，避免产生重复行）：
+-   *   A. 布局里有项但一个都不可见 → 只重新排布坐标（updateInfoPosition 按
++   * 处理方式（分开处理，避免产生重复行）：
++   *   A. 有一部分可见、另一部分越界 → 只把越界的挪到空闲格子（fix_desktop2）；
++   *   B. 布局里有项但一个都不可见 → 重新排布坐标（updateInfoPosition 按
+    *      bundleName+appIndex 原地更新，不会新增行），不增删 app；
+-   *   B. 布局里一项都没有 → 用 AppModel 中全部已安装、且有桌面入口的 app
++   *   C. 布局里一项都没有 → 用 AppModel 中全部已安装、且有桌面入口的 app
+    *      按当前宫格顺序重建并落库（此时表是空的，不会重复）。
+    */
+   private async ensureDesktopIconsVisible(): Promise<boolean> {
+@@ -301,6 +434,14 @@
+       const visible: GridLayoutItemInfo[] = items.filter((item: GridLayoutItemInfo) =>
+         this.isItemVisibleInGrid(item, grid.rows, grid.columns));
+       if (visible.length > 0) {
++        // fix_desktop2: 可见的保持原位，只把越界的挪进来
++        const moved: number = this.repositionOutOfGridItems(items, grid);
++        if (moved > 0) {
++          await RdbStoreManager.getInstance().updateInfoPosition(items, 'fixDesktopOutOfGrid');
++          log.showWarn(TAG, 'ensureDesktopIconsVisible: moved %{public}d out-of-grid items into the ' +
++            '%{public}d x %{public}d grid', moved, grid.rows, grid.columns);
++          return true;
++        }
+         log.showInfo(TAG, 'ensureDesktopIconsVisible: %{public}d visible icons, keep as is', visible.length);
+         return false;
+       }
+@@ -352,6 +493,62 @@
+       return false;
+     }
+   }
++
++  /**
++   * fix_desktop2: 兜底 —— 用“已安装的 app”重建桌面布局。
++   *
++   * 场景：布局表里有数据、area 也被修好了，但桌面页仍然一个图标都不画
++   *       （真机 2026-10-22 的现象：RS 树里没有任何桌面图标节点）。
++   *       这时最稳妥的做法是丢掉旧坐标，用已安装 app 按当前宫格重新排一份，
++   *       落库并刷新布局缓存，让桌面至少能显示图标。
++   *
++   * 只重建“桌面(container = CONTAINER_DESKTOP)”的元素，
++   * 应用中心(app_center_layout_info)与 dock(container = -101)不受影响。
++   */
++  public async rebuildDesktopLayoutFromInstalledApps(): Promise<boolean> {
++    try {
++      const grid: GridSize = this.getDesktopGridSize();
++      const totalAppInfoList: AppItemInfo[] = AppModel.getInstance().getAppList();
++      if (CheckEmptyUtils.isEmptyArr(totalAppInfoList)) {
++        log.showWarn(TAG, 'rebuildDesktopLayoutFromInstalledApps: app list empty, give up');
++        return false;
++      }
++      const rebuilt: GridLayoutItemInfo[] = [];
++      for (const app of totalAppInfoList) {
++        if (NoIconAppModel.getInstance().checkIfBundleIsNoIconApp(app.bundleName)) {
++          continue;
++        }
++        const info: GridLayoutItemInfo = new GridLayoutItemInfo();
++        info.bundleName = app.bundleName;
++        info.abilityName = app.abilityName;
++        info.moduleName = app.moduleName;
++        info.appIndex = app.appIndex ?? 0;
++        info.typeId = CommonConstants.TYPE_APP;
++        info.area = [1, 1];
++        info.container = CommonConstants.CONTAINER_DESKTOP;
++        if (!this.updateAppInfoFromBMS(info, totalAppInfoList)) {
++          continue;
++        }
++        rebuilt.push(info);
++      }
++      if (CheckEmptyUtils.isEmptyArr(rebuilt)) {
++        log.showWarn(TAG, 'rebuildDesktopLayoutFromInstalledApps: rebuilt list empty, give up');
++        return false;
++      }
++      const positioned: GridLayoutItemInfo[] = this.repositionItems(rebuilt, grid);
++      await RdbStoreManager.getInstance().insertGridLayoutInfo(positioned, false);
++      // 用重建后的布局刷新内存缓存，并通知桌面页重新加载
++      this.mGridLayoutInfo.layoutInfo = positioned;
++      this.initLayoutCache();
++      localEventManager.sendLocalEvent(EventConstants.EVENT_LAYOUT_INIT_FINISHED, null);
++      log.showWarn(TAG, 'DESKTOPREPAIR: rebuilt the desktop layout from %{public}d installed apps ' +
++        '(grid %{public}d x %{public}d)', positioned.length, grid.rows, grid.columns);
++      return true;
++    } catch (err) {
++      log.showError(TAG, `rebuildDesktopLayoutFromInstalledApps err: ${err?.code} ${err?.message}`);
++      return false;
++    }
++  }
+ 
+   /**
+    * fix_desktop_layout: 按当前宫格重新排布坐标（行优先，放不下就翻页）。
+--- a/product/pcbase/src/main/ets/SceneBoard/systemscene/SCBDesktop.ets
++++ b/product/pcbase/src/main/ets/SceneBoard/systemscene/SCBDesktop.ets
+@@ -102,6 +102,7 @@
+ import common from '@ohos.app.ability.common';
+ import PowerStatusChangeAnimationController from '../scenemanager/PowerStatusChangeAnimationController';
+ import PcPageDesktopGridStyleConfig from '../../common/PcPageDesktopGridStyleConfig';
++import PcPageDesktopLayoutConfig from '../../common/PcPageDesktopLayoutConfig';
+ import { PcLayoutRulesController } from '../control/SceneDesktopController/PcLayoutRulesController';
+ import LockScreenAnimationController from '../screenlock/common/LockScreenAnimationController';
+ import PcRightMenuViewModel from '../../common/viewmodel/PcRightMenuViewModel';
+@@ -204,6 +205,10 @@
+   persistentId : number = 0;
+   @State scaleValue: number = 1;
+   @State opacityValue: number = 1;
++  // fix_desktop2: 周期性打印桌面图标数量（真机自证判据，避免开机日志被 hilog 环形缓冲冲掉）
++  private desktopIconLogTimer: number = -1;
++  // fix_desktop2: 桌面一个图标都没画出来时的兜底修复（只做一次）
++  private desktopRepairTried: boolean = false;
+   @State hibernateDialogOffsetY: number = 0;
+   @StorageLink('isLock') @Watch('onLock') isLock: boolean = true;
+   @Provide isShowingUninstallDialog: number = UninstallDialogStatus.INITIAL_STATE;
+@@ -368,9 +373,126 @@
+     }
+   }
+ 
++    /**
++   * fix_desktop2: 周期性打印桌面图标数量。
++   * hilog 的环形缓冲在开机后几分钟就会被冲掉，所以桌面页的判定日志必须能“随时”取到。
++   */
++  private startDesktopIconLog(): void {
++    this.stopDesktopIconLog();
++    this.desktopIconLogTimer = setInterval(() => {
++      this.logDesktopIconCount('timer');
++      this.checkAndRepairDesktop();
++    }, 30000);
++  }
++
++  /**
++   * fix_desktop2: 兜底修复 —— 桌面页一个图标都没画出来时，用已安装的 app 重建布局。
++   *
++   * 判据：桌面页(SwiperPage)上报的渲染数量为 0，但布局里确实有桌面项。
++   * 只在开机后触发一次，避免反复重建。
++   */
++  private checkAndRepairDesktop(): void {
++    if (this.desktopRepairTried) {
++      return;
++    }
++    try {
++      const rendered: number | undefined = AppStorage.get<number>('desktopIconRendered');
++      if (rendered === undefined) {
++        // 桌面页还没上报，先不判断
++        return;
++      }
++      if (rendered > 0) {
++        return;
++      }
++      const items: GridLayoutItemInfo[] = LaunchLayoutCacheManager.getInstance()
++        .selectAppAndShortcutByContainer(CommonConstants.CONTAINER_DESKTOP, false);
++      if (!items || items.length === 0) {
++        return;
++      }
++      this.desktopRepairTried = true;
++      log.showWarn(TAG, 'DESKTOPREPAIR: the desktop renders 0 icons but the layout has %{public}d items ' +
++        '-> rebuilding the desktop layout from the installed apps', items.length);
++      PcPageDesktopLayoutConfig.getInstance().rebuildDesktopLayoutFromInstalledApps();
++    } catch (err) {
++      log.showError(TAG, `checkAndRepairDesktop err: ${err?.code} ${err?.message}`);
++    }
++  }
++
++  private stopDesktopIconLog(): void {
++    if (this.desktopIconLogTimer !== -1) {
++      clearInterval(this.desktopIconLogTimer);
++      this.desktopIconLogTimer = -1;
++    }
++  }
++
++  /**
++   * fix_desktop2: 统计并打印桌面(container = CONTAINER_DESKTOP)里真正能渲染出来的图标数量。
++   *
++   * 判据与 PageDesktopViewModel.filterItemExceedCurrentScreen() 一致：
++   *   area 合法(长度 2 且是有限数) 且 row/column 落在当前宫格范围内。
++   * area 缺失/NaN 的元素在 DesktopItem 里算出的图标中心坐标是 NaN，ArkUI 无法摆放，
++   * 因此不会出现在屏幕上（真机现象：桌面一个图标都没有，但应用中心/dock 正常）。
++   */
++  private logDesktopIconCount(reason: string): void {
++    try {
++      const items: GridLayoutItemInfo[] = LaunchLayoutCacheManager.getInstance()
++        .selectAppAndShortcutByContainer(CommonConstants.CONTAINER_DESKTOP, false);
++      let rows: number = 0;
++      let columns: number = 0;
++      try {
++        const rst: CalculateDesktopRst = LayoutViewModel.getInstance().calculateDesktop();
++        rows = rst.mRows ?? 0;
++        columns = rst.mColumns ?? 0;
++      } catch (err) {
++        log.showWarn(TAG, `logDesktopIconCount calculateDesktop err: ${err?.code}`);
++      }
++      let withArea: number = 0;
++      let visible: number = 0;
++      for (const item of items) {
++        if (!item) {
++          continue;
++        }
++        const area: number[] | undefined = item.area;
++        const areaOk: boolean = !!area && area.length === 2 &&
++          Number.isFinite(area[0]) && Number.isFinite(area[1]);
++        if (areaOk) {
++          withArea++;
++        }
++        if (!areaOk || rows <= 0 || columns <= 0) {
++          continue;
++        }
++        const row: number = item.row ?? -1;
++        const column: number = item.column ?? -1;
++        const rowInGrid: boolean = row >= 0 && ((row + area![1] - 1) < rows);
++        const colInGrid: boolean = column >= 0 && ((column + area![0] - 1) < columns);
++        if (rowInGrid && colInGrid) {
++          visible++;
++        }
++      }
++      AppStorage.setOrCreate('desktopIconVisible', visible);
++      // fix_desktop2: areaFixed = 开机时修复过的非法 area 个数（-1 = 没拿到该信息）
++      let areaFixed: number = -1;
++      try {
++        const v: number | undefined = AppStorage.get<number>('desktopAreaFixed');
++        if (v !== undefined) {
++          areaFixed = v;
++        }
++      } catch (err) {
++        log.showWarn(TAG, `logDesktopIconCount AppStorage err: ${err?.code}`);
++      }
++      log.showWarn(TAG,
++        'DESKTOPICONS page=-1 layoutVisible=%{public}d reason=%{public}s desktopIcons=%{public}d total=%{public}d ' +
++        'withArea=%{public}d grid=%{public}dx%{public}d areaFixed=%{public}d',
++        visible, reason, visible, items.length, withArea, rows, columns, areaFixed);
++    } catch (err) {
++      log.showError(TAG, `logDesktopIconCount err: ${err?.code} ${err?.message}`);
++    }
++  }
++
+   onLock() {
+     // Do not handle when oobe is enabled
+     log.showInfo(TAG, 'onLock, isLock: %{public}s', this.isLock);
++    this.logDesktopIconCount('onLock');
+     if (sSCBOobeManager.isOobeActivated()) {
+       localEventManager.sendLocalEventSticky(EventConstants.EVENT_REQUEST_FORM_ITEM_VISIBLE, !this.isLock);
+       log.showWarn(TAG, 'OOBE is activated, cant process event');
+@@ -461,6 +583,7 @@
+ 
+   aboutToAppear(): void {
+     log.showInfo(TAG, 'aboutToAppear');
++    this.startDesktopIconLog();
+     DesktopLayoutManager.setDesktopLayoutManager(new PcDesktopLayoutManager());
+     SCBSampleManager.getInstance().registerKeyObserverSample();
+     PageDesktopViewModel.getInstance(this.singleContext)?.voteBootEvent();
+@@ -1166,6 +1289,7 @@
+   }
+ 
+   aboutToDisappear(): void {
++    this.stopDesktopIconLog();
+     FormEditViewProxy.getInstance().destroy();
+     FormEditSecViewProxy.getInstance().destroy();
+     this.destroyDialog();
+@@ -1439,6 +1563,9 @@
+   private desktopFocusCallback: ViewCallback = {
+     onGainFocus: ():void => {
+       log.showInfo(TAG, 'onGainFocus');
++      // fix_desktop2: 桌面获得焦点时打印当前渲染出来的图标数量（真机自证判据用，
++      // 因为布局初始化日志在开机早期，会被 hilog 环形缓冲冲掉）
++      this.logDesktopIconCount('onGainFocus');
+       DesktopStatusBarHelper.ensureVisibleOnDesktop('SCBDesktop.onGainFocus');
+       this.desktopFocused = true;
+       localEventManager.sendLocalEventSticky(EventConstants.EVENT_REQUEST_DESKTOP_FOCUS_CHANGE, true);
+--- a/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json
++++ b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo.json
+@@ -12,225 +12,350 @@
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 0,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.dhardwareui",
+       "abilityName": "DHardwareUIAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 1,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.locationdialog",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 2,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.terminal",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 3,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.calculator",
+       "abilityName": "CalculatorAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 4,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.calendar",
+       "abilityName": "MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 5,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.callui",
+       "abilityName": "com.ohos.callui.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 6,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.camera",
+       "abilityName": "com.ohos.camera.MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 7,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.certmanager",
+       "abilityName": "MainAbility",
+       "moduleName": "CertManager",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 8,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.contacts",
+       "abilityName": "com.ohos.contacts.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 9,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "ohos.samples.distributedmusicplayer",
+       "abilityName": "ohos.samples.distributedmusicplayer.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 10,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.emergencycommunication",
+       "abilityName": "com.ohos.emergencycommunication.SOSEmergencyCallAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 11,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.filemanager",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 12,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.intelligentscene",
+       "abilityName": "EntryAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 13,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.mms",
+       "abilityName": "com.ohos.mms.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 14,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.note",
+       "abilityName": "MainAbility",
+       "moduleName": "default",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 15,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.photos",
+       "abilityName": "com.ohos.photos.MainAbility",
+       "moduleName": "phone_photos",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 0,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.security.privacycenter",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 1,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.settings",
+       "abilityName": "com.ohos.settings.MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 2,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.soundrecorder",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 3,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.updateapp",
+       "abilityName": "com.ohos.updateapp.MainAbility",
+       "moduleName": "updateapp",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 4,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.clock",
+       "abilityName": "com.ohos.clock.phone",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 5,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.browser",
+       "abilityName": "MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 6,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.players",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 7,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "org.aira.browser",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 8,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     }
+   ]
+-}
+\ No newline at end of file
++}
+--- a/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo_pc_mode.json
++++ b/feature/pcbase/pcresources/src/main/resources/rawfile/layoutInfo_pc_mode.json
+@@ -12,225 +12,350 @@
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 0,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.dhardwareui",
+       "abilityName": "DHardwareUIAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 1,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.locationdialog",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 2,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.terminal",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 3,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.calculator",
+       "abilityName": "CalculatorAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 4,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.calendar",
+       "abilityName": "MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 5,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.callui",
+       "abilityName": "com.ohos.callui.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 6,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.camera",
+       "abilityName": "com.ohos.camera.MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 7,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.certmanager",
+       "abilityName": "MainAbility",
+       "moduleName": "CertManager",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 8,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.contacts",
+       "abilityName": "com.ohos.contacts.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 9,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "ohos.samples.distributedmusicplayer",
+       "abilityName": "ohos.samples.distributedmusicplayer.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 10,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.emergencycommunication",
+       "abilityName": "com.ohos.emergencycommunication.SOSEmergencyCallAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 11,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.filemanager",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 12,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.intelligentscene",
+       "abilityName": "EntryAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 13,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.mms",
+       "abilityName": "com.ohos.mms.MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 14,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.note",
+       "abilityName": "MainAbility",
+       "moduleName": "default",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 15,
+-      "row": 0
++      "row": 0,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.photos",
+       "abilityName": "com.ohos.photos.MainAbility",
+       "moduleName": "phone_photos",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 0,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.security.privacycenter",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 1,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.settings",
+       "abilityName": "com.ohos.settings.MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 2,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.soundrecorder",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 3,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.updateapp",
+       "abilityName": "com.ohos.updateapp.MainAbility",
+       "moduleName": "updateapp",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 4,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.clock",
+       "abilityName": "com.ohos.clock.phone",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 5,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.browser",
+       "abilityName": "MainAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 6,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "com.ohos.players",
+       "abilityName": "MainAbility",
+       "moduleName": "phone",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 7,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     },
+     {
+       "bundleName": "org.aira.browser",
+       "abilityName": "EntryAbility",
+       "moduleName": "entry",
+       "container": -100,
++      "page": 0,
+       "typeId": 0,
+       "column": 8,
+-      "row": 1
++      "row": 1,
++      "area": [
++        1,
++        1
++      ]
+     }
+   ]
+-}
+\ No newline at end of file
++}
+diff --git a/staticcommon/launchercommon/src/main/ets/layoutconfig/PageDesktopLayoutConfig.ts b/staticcommon/launchercommon/src/main/ets/layoutconfig/PageDesktopLayoutConfig.ts
+index 9d379e38..bd193958 100644
+--- a/staticcommon/launchercommon/src/main/ets/layoutconfig/PageDesktopLayoutConfig.ts
++++ b/staticcommon/launchercommon/src/main/ets/layoutconfig/PageDesktopLayoutConfig.ts
+@@ -258,6 +258,15 @@ export class PageDesktopLayoutConfig extends ILayoutConfig {
+       LauncherStartup.getInstance().passStep(StartupStep.CORRECTOR, `len:${configFromRdb?.length}`);
+       configFromRdb = await this.filterDbListByInstalled(configFromRdb, installedApps, false);
+       LauncherStartup.getInstance().passStep(StartupStep.FILTER_BY_BMS, `len:${configFromRdb?.length}`);
++      // fix_desktop2: 桌面项的 area(width/height) 归一化。
++      // 预置 layoutInfo.json 的条目没有 area 字段 -> 落库时 width/height 为 NULL ->
++      // 读回来 area=[NaN,NaN] -> DesktopItem 里算出的图标中心坐标是 NaN，
++      // ArkUI 无法摆放；同时 filterItemExceedCurrentScreen() 的边界比较也全部为 false。
++      // 结果：桌面一个图标都不显示（应用中心/dock 不受影响，因为它们的布局带 area）。
++      const areaFixed: number = this.normalizeDesktopItemArea(configFromRdb);
++      if (areaFixed > 0) {
++        await this.persistDesktopItemArea(configFromRdb);
++      }
+       defaultConfig.layoutInfo = configFromRdb;
+       this.mGridLayoutInfo = defaultConfig;
+       this.initLayoutCache();
+@@ -299,6 +308,81 @@ export class PageDesktopLayoutConfig extends ILayoutConfig {
+   protected async dealLastBlankPage(pageCount: number): Promise<void> {
+   }
+ 
++  /**
++   * fix_desktop2: 把桌面项缺失/非法的 area 与 page 归一化。
++   *
++   * 背景（两个字段都来自预置 rawfile layoutInfo.json，缺失就会让桌面一个图标都不显示）：
++   *
++   * 1) "area" 缺失：
++   *    GridLayoutItemInfoDataBase.toGridLayoutItemInfoDB() 只在 area 合法时才写
++   *    width/height，落库后这两列为 NULL；读回时
++   *    GridLayoutItemBuilder.setArea("null,null") 得到 area = [NaN, NaN]。
++   *
++   * 2) "page" 缺失（**真机桌面空白的真正原因**）：
++   *    落库后 page_index 为 NULL -> 读回 item.page === undefined ->
++   *    PageDesktopViewModel.integrateSwiper() 里
++   *      "if (mPage === undefined || mPage < 0 || ...) { logError(...); } else { push }"
++   *    —— 没有 page 的元素**不会被放进任何一页**，于是桌面页一个图标都没有
++   *    （真机 2026-10-22：RDB 里 17 行桌面项的 page_index 全是 NULL，
++   *      RS 树里没有任何桌面图标节点，只有壁纸）。
++   *
++   * 返回被修正的条目数。
++   */
++  protected normalizeDesktopItemArea(items: GridLayoutItemInfo[]): number {
++    if (!items || items.length === 0) {
++      return 0;
++    }
++    let fixed: number = 0;
++    let pageFixed: number = 0;
++    for (const item of items) {
++      if (!item || item.container !== CommonConstants.CONTAINER_DESKTOP) {
++        continue;
++      }
++      const area: number[] | undefined = item.area;
++      const invalid: boolean = !area || area.length !== 2 ||
++        !Number.isFinite(area[0]) || !Number.isFinite(area[1]) || area[0] <= 0 || area[1] <= 0;
++      if (invalid) {
++        log.showWarn(`normalizeDesktopItemArea: fix area of ${item.bundleName}, old=${JSON.stringify(area)}`);
++        item.area = [1, 1];
++        fixed++;
++      }
++      // fix_desktop2: page 必须有值，否则 integrateSwiper() 会把这个元素丢掉
++      if (item.page === undefined || item.page === null || item.page < 0) {
++        log.showWarn(`normalizeDesktopItemArea: fix page of ${item.bundleName}, old=${JSON.stringify(item.page)}`);
++        item.page = 0;
++        pageFixed++;
++      }
++    }
++    log.showWarn(`DESKTOPLAYOUT: normalizeDesktopItemArea fixed=${fixed} pageFixed=${pageFixed} ` +
++      `total=${items.length}`);
++    // fix_desktop2: 把修复数量放进 AppStorage —— 开机时的一次性日志会被 hilog
++    // 环形缓冲冲掉，桌面页的周期性日志要能随时报出“修过几个”。
++    AppStorage.setOrCreate('desktopAreaFixed', fixed);
++    AppStorage.setOrCreate('desktopPageFixed', pageFixed);
++    AppStorage.setOrCreate('desktopAreaTotal', items.length);
++    return fixed + pageFixed;
++  }
++
++  /**
++   * fix_desktop2: 把归一化后的 area(width/height) 落库，避免下次开机又读回 NULL。
++   * 只更新桌面项(container = CONTAINER_DESKTOP)，不动 dock/应用中心。
++   */
++  protected async persistDesktopItemArea(items: GridLayoutItemInfo[]): Promise<void> {
++    try {
++      const desktopItems: GridLayoutItemInfo[] = (items ?? []).filter(
++        (item: GridLayoutItemInfo) => item && item.container === CommonConstants.CONTAINER_DESKTOP &&
++          item.typeId === CommonConstants.TYPE_APP);
++      if (!desktopItems || desktopItems.length === 0) {
++        return;
++      }
++      const ok: boolean = await RdbStoreManager.getInstance()
++        .updateInfoPosition(desktopItems, 'fixDesktopItemArea');
++      log.showWarn(`DESKTOPLAYOUT: persistDesktopItemArea count=${desktopItems.length} ok=${ok}`);
++    } catch (err) {
++      log.showError(`persistDesktopItemArea err, code: ${err?.code}, message: ${err?.message}`);
++    }
++  }
++
+   /**
+    * 添加布局修护器
+    * @param gridLayoutCorrector
+@@ -321,6 +405,11 @@ export class PageDesktopLayoutConfig extends ILayoutConfig {
+     LauncherStartup.getInstance().passStep(StartupStep.LOAD_CONFIG);
+     AppModel.getInstance().initIconNameCache();
+     await this.loadLayoutInfoFromConfig(pageCount, desktopMode);
++    // fix_desktop2: 预置布局同样做一次 area 归一化（预置文件可能没有 area 字段）
++    const areaFixed: number = this.normalizeDesktopItemArea(this.mGridLayoutInfo.layoutInfo);
++    if (areaFixed > 0) {
++      await this.persistDesktopItemArea(this.mGridLayoutInfo.layoutInfo);
++    }
+     this.initLayoutCache();
+     LauncherStartup.getInstance().passStep(StartupStep.INIT_CACHE);
+     ContactCacheManager.getInstance().checkToAddContactShortcut();

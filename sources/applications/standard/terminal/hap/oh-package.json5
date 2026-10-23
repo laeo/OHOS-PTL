@@ -1,0 +1,7 @@
+{
+  "modelVersion": "26.0.0",
+  "name": "terminal",
+  "version": "1.0.0",
+  "description": "OHOS GUI terminal backed by a local root shell daemon",
+  "dependencies": {}
+}

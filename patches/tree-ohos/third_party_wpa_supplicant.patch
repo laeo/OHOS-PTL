@@ -1,0 +1,16 @@
+diff --git a/wpa_supplicant-2.9_standard/src/drivers/driver_nl80211_capa.c b/wpa_supplicant-2.9_standard/src/drivers/driver_nl80211_capa.c
+index 9365ab2..725e7c9 100644
+--- a/wpa_supplicant-2.9_standard/src/drivers/driver_nl80211_capa.c
++++ b/wpa_supplicant-2.9_standard/src/drivers/driver_nl80211_capa.c
+@@ -1892,6 +1892,11 @@ static int phy_info_rates(struct hostapd_hw_modes *mode, struct nlattr *tb)
+ 		mode->num_rates++;
+ 	}
+ 
++	/* OHOS musl calloc() divides by its second argument and faults on
++	 * calloc(n, 0); skip the allocation when the band reports no rates. */
++	if (mode->num_rates == 0)
++		return NL_OK;
++
+ 	mode->rates = os_calloc(mode->num_rates, sizeof(int));
+ 	if (!mode->rates)
+ 		return NL_STOP;

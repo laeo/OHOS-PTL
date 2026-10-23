@@ -1,0 +1,1918 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Intel Panther Lake (X7-358H) firmware, captured from the host's
+# /lib/firmware (linux-firmware) and decompressed from .zst so that the
+# in-tree kernel (CONFIG_FW_LOADER_COMPRESS_ZSTD is NOT set) can load them.
+#
+# They are installed into BOTH:
+#   * the ramdisk (`/lib/firmware`) so that built-in drivers (iwlwifi /
+#     btintel_pcie are still =y) can load firmware during early boot, before the
+#     system partition is mounted; and
+#   * the system image (`/system/lib/firmware`), which the OHOS sandbox exposes
+#     as `/lib/firmware` (`/lib -> /system/lib`) to services and to the kernel
+#     modules (xe / i915 are =m) that OHOS init loads after switch_root.
+#
+# IMPORTANT (SOF / IPC4): the module_install_dir of every SOF file MUST carry
+# the `intel/` prefix, because that is exactly the path the in-tree kernel
+# asks the firmware loader for:
+#   sound/soc/sof/intel/pci-ptl.c:42  default_fw_path  = "intel/sof-ipc4/ptl"
+#   sound/soc/sof/intel/pci-ptl.c:45  default_lib_path = "intel/sof-ipc4-lib/ptl"
+#   sound/soc/sof/intel/pci-ptl.c:48  default_tplg_path = "intel/sof-ipc4-tplg"
+#   sound/soc/sof/intel/pci-ptl.c:51  default_fw_filename = "sof-ptl.ri"
+#   sound/soc/sof/core.c:310          plat_data->fw_filename_prefix = fw_path
+#   sound/soc/sof/ipc4-loader.c:296   split release libs: <prefix>/sof-ptl-openmodules.ri
+# The kernel search roots are firmware_class.path (cmdline:
+# /system/lib/firmware) then /lib/firmware
+# (drivers/base/firmware_loader/main.c:471-478), so the files have to live at
+#   <root>/intel/sof-ipc4/ptl/sof-ptl.ri
+#   <root>/intel/sof-ipc4/ptl/sof-ptl-openmodules.ri
+#   <root>/intel/sof-ipc4-tplg/<topology>.tplg
+# Installing them without `intel/` (as this file used to do) makes the kernel
+# look in a directory that does not exist -> no firmware, no sof-hda-dsp card.
+
+import("//build/ohos.gni")
+import("//device/pc/ptl/device.gni")
+
+_pc_ptl_images = [
+  "system",
+  "ramdisk",
+]
+
+ohos_prebuilt_etc("ptl_guc") {
+  source = "xe/ptl_guc_70.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/xe"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("ptl_huc") {
+  source = "xe/ptl_huc.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/xe"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("ptl_gsc") {
+  source = "xe/ptl_gsc_1.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/xe"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("xe3lpd_dmc") {
+  source = "i915/xe3lpd_dmc.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/i915"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("iwlwifi_sc_a0_gf_a0") {
+  source = "iwlwifi-sc-a0-gf-a0-100.ucode"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("ibt_iml") {
+  source = "intel/ibt-00a0-0041-iml.sfi"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("ibt_pci") {
+  source = "intel/ibt-00a0-0041-pci.sfi"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("ibt_ddc") {
+  source = "intel/ibt-00a0-0041-pci.ddc"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+# --- audio (SOF IPC4) firmware/bundle/topology, captured from the host's
+#     /lib/firmware/intel (decompressed).  See FIRMWARE_MANIFEST.md. ---
+
+ohos_prebuilt_etc("f_sof_ipc4_lib_lnl_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin") {
+  source = "intel/sof-ipc4-lib/lnl/B36EE4DA-006F-47F9-A06D-FECBE2D8B6CE.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-lib/lnl"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_lib_lnl_community_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin") {
+  source = "intel/sof-ipc4-lib/lnl/community/B36EE4DA-006F-47F9-A06D-FECBE2D8B6CE.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-lib/lnl/community"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_lib_lnl_community_drc_llext") {
+  source = "intel/sof-ipc4-lib/lnl/community/drc.llext"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-lib/lnl/community"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_lib_lnl_intel_signed_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin") {
+  source = "intel/sof-ipc4-lib/lnl/intel-signed/B36EE4DA-006F-47F9-A06D-FECBE2D8B6CE.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-lib/lnl/intel-signed"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_lib_lnl_intel_signed_drc_llext") {
+  source = "intel/sof-ipc4-lib/lnl/intel-signed/drc.llext"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-lib/lnl/intel-signed"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_adl_cs42l43_l0_cs35l56_l23_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-adl-cs42l43-l0-cs35l56-l23.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_adl_rt711_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-adl-rt711-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1308_l12_rt715_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-adl-rt711-l0-rt1308-l12-rt715-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1316_l12_rt714_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-adl-rt711-l0-rt1316-l12-rt714-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1316_l13_rt714_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-adl-rt711-l0-rt1316-l13-rt714-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l2_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l0-cs35l56-l2-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l0-cs35l56-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l23_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l0-cs35l56-l23.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l2_cs35l56_l3_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l2-cs35l56-l3-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l2_cs35l56_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l2-cs35l56-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_cs42l43_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-cs42l43-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_2ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-2ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_2ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-2ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_2ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-2ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_2ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-2ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_4ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-4ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_4ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-4ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_4ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-4ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_dmic_4ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-dmic-4ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0-rt1316-l3-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0-rt1316-l3-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0-rt1316-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt711_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt711-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_arl_rt722_l0_rt1320_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-arl-rt722-l0_rt1320-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_1ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-1ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace1_1ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace1-1ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace1_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace1-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace1_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace1-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace1_idisp_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace1-idisp-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace1_idisp_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace1-idisp-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace3_1ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace3-1ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace3_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace3-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace3_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace3-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace3_idisp_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace3-idisp-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_ace3_idisp_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-ace3-idisp-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_cavs25_1ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-cavs25-1ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_cavs25_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-cavs25-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_cavs25_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-cavs25-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_cavs25_idisp_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-cavs25-idisp-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_cavs25_idisp_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-cavs25-idisp-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_idisp_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-idisp-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_idisp_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-idisp-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_idisp_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic-idisp.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hda_generic_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hda-generic.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id6_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id6.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_hdmi_pcm5_id7_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-hdmi-pcm5-id7.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-cs35l56-l23-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-cs35l56-l23-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-cs35l56-l23.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l3_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-cs35l56-l3-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0-cs35l56-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_cs42l43_l2_cs35l56x6_l13_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-cs42l43-l2-cs35l56x6-l13.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-2ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-2ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-2ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-2ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-4ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-4ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-4ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-dmic-4ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt1318_l12_rt714_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt1318-l12-rt714-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt1320_l12_rt714_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt1320-l12-rt714-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt711_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt711-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt711_l0_rt1316_l23_rt714_l1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt711-l0-rt1316-l23-rt714-l1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt712_l2_rt1320_l1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt712-l2-rt1320-l1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt712_l2_rt1712_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt712-l2-rt1712-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt713_l0_rt1318_l1_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt713-l0-rt1318-l1-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt713_l0_rt1318_l1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt713-l0-rt1318-l1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt713_l2_rt1320_l13_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt713-l2-rt1320-l13.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_lnl_rt722_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-lnl-rt722-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs35l56_l01_fb6_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs35l56-l01-fb6.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs35l56_l01_fb8_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs35l56-l01-fb8.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_cs35l56_l12_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs42l43-l0-cs35l56-l12.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_cs35l56_l23_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs42l43-l0-cs35l56-l23.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs42l43-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_cs42l43_l3_cs35l56_l01_spkagg_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-cs42l43-l3-cs35l56-l01-spkagg.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-2ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-2ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-2ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-2ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-4ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-4ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-4ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-dmic-4ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_es83x6_ssp1_hdmi_ssp02_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-es83x6-ssp1-hdmi-ssp02.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_es83x6_ssp1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-es83x6-ssp1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_hdmi_ssp02_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-hdmi-ssp02.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_google_aec_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682-google-aec.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_2ch_pdm1_google_aec_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682-ssp2-ssp0-2ch-pdm1-google-aec.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_2ch_pdm1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682-ssp2-ssp0-2ch-pdm1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_google_aec_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682-ssp2-ssp0-google-aec.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682-ssp2-ssp0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98357a-rt5682.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_max98360a_rt5682_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-max98360a-rt5682.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt1019_rt5682_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt1019-rt5682.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt1318_l12_rt714_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt1318-l12-rt714-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt5650_dts_google_aec_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt5650-dts-google-aec.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt5650_dts_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt5650-dts.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt5650_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt5650.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l23_rt714_l1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-l0-rt1316-l23-rt714-l1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-l0-rt1316-l3-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-l0-rt1316-l3-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt711-l0-rt1316-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt712_l0_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt712-l0-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt712_l0_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt712-l0-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt712_l0_rt1712_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt712-l0-rt1712-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt712_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt712-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt712_vb_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt712-vb-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1316_l12_rt1713_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt713-l0-rt1316-l12-rt1713-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1316_l12_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt713-l0-rt1316-l12.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1318_l1_rt1713_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt713-l0-rt1318-l1-rt1713-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1318_l12_rt1713_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt713-l0-rt1318-l12-rt1713-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_rt722_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-rt722-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_mtl_sdw_cs42l42_l0_max98363_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-mtl-sdw-cs42l42-l0-max98363-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_cs42l43_agg_l3_cs35l56_l2_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-cs42l43-agg-l3-cs35l56-l2-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_cs42l43_agg_l3_cs35l56_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-cs42l43-agg-l3-cs35l56-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_cs42l43_l2_cs35l56x6_l13_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-cs42l43-l2-cs35l56x6-l13.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-2ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-2ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-2ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-2ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-4ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-4ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-4ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-dmic-4ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_es8336_ssp1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-es8336-ssp1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_es83x6_ssp1_hdmi_ssp02_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-es83x6-ssp1-hdmi-ssp02.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_hdmi_ssp02_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-hdmi-ssp02.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt711_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt711-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt711_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt711-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt711_rt1308_mono_rt715_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt711-rt1308-mono-rt715.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt711_rt1308_rt715_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt711-rt1308-rt715.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt711_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt711.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt712_l2_rt1320_l1_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt712-l2-rt1320-l1.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt712-l3-rt1320-l2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l3_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt712-l3-rt1320-l3-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt712-l3-rt1320-l3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt713_l2_rt1320_l13_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt713-l2-rt1320-l13.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt713_l3_rt1320_l12_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt713-l3-rt1320-l12.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt715_rt711_rt1308_mono_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt715-rt711-rt1308-mono.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt721_4ch_96k_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt721-4ch-96k.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt721_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt721-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt721_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt721.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_192k_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-192k.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_96k_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-96k.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_2ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-l0-rt1320-l23-2ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-l0-rt1320-l23-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722-l0-rt1320-l23.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_rt722_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-rt722.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_ptl_tas2563_rt5682_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-ptl-tas2563-rt5682.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_rpl_cs42l43_l0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-rpl-cs42l43-l0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_1amp_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-1amp-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_2amp_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-2amp-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_3amp_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-3amp-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_4amp_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-4amp-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_jack_id0_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-jack-id0.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdca_mic_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdca-mic-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_sdw_generic_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-sdw-generic.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_cs35l56_l01_fb8_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-cs35l56-l01-fb8.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_cs42l43_l3_cs35l56_l01_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-cs42l43-l3-cs35l56-l01.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_rt711_rt1308_4ch_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-rt711-rt1308-4ch.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_rt711_rt1308_rt715_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-rt711-rt1308-rt715.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_rt711_rt1316_rt714_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-rt711-rt1316-rt714.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_rt712_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-rt712.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_tgl_rt715_rt711_rt1308_mono_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-tgl-rt715-rt711-rt1308-mono.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-2ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-2ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-2ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-2ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id2_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-4ch-id2.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id3_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-4ch-id3.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id4_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-4ch-id4.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id5_tplg") {
+  source = "intel/sof-ipc4-tplg/sof-wcl-dmic-4ch-id5.tplg"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4-tplg"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_ptl_sof_ptl_openmodules_ri") {
+  source = "intel/sof-ipc4/ptl/sof-ptl-openmodules.ri"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4/ptl"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("f_sof_ipc4_ptl_sof_ptl_ri") {
+  source = "intel/sof-ipc4/ptl/sof-ptl.ri"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/sof-ipc4/ptl"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("intel_vpu_50xx") {
+  source = "intel/vpu/vpu_50xx_v1.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/vpu"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("intel_ish_ptl") {
+  source = "intel/ish/ish_ptl.bin"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware/intel/ish"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("regulatory_db") {
+  source = "regulatory.db"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+ohos_prebuilt_etc("regulatory_db_p7s") {
+  source = "regulatory.db.p7s"
+  install_images = _pc_ptl_images
+  module_install_dir = "lib/firmware"
+  subsystem_name = pc_ptl_subsystem_name
+  part_name = pc_ptl_part_name
+}
+
+group("pc_ptl_firmware") {
+  deps = [
+    ":f_sof_ipc4_lib_lnl_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin",
+    ":f_sof_ipc4_lib_lnl_community_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin",
+    ":f_sof_ipc4_lib_lnl_community_drc_llext",
+    ":f_sof_ipc4_lib_lnl_intel_signed_B36EE4DA_006F_47F9_A06D_FECBE2D8B6CE_bin",
+    ":f_sof_ipc4_lib_lnl_intel_signed_drc_llext",
+    ":f_sof_ipc4_tplg_sof_adl_cs42l43_l0_cs35l56_l23_tplg",
+    ":f_sof_ipc4_tplg_sof_adl_rt711_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1308_l12_rt715_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1316_l12_rt714_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_adl_rt711_l0_rt1316_l13_rt714_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l2_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l0_cs35l56_l23_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l2_cs35l56_l3_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l2_cs35l56_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_cs42l43_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_2ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_2ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_2ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_2ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_4ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_4ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_4ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_dmic_4ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_rt1316_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt711_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_arl_rt722_l0_rt1320_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_1ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace1_1ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace1_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace1_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace1_idisp_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace1_idisp_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace3_1ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace3_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace3_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace3_idisp_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_ace3_idisp_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_cavs25_1ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_cavs25_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_cavs25_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_cavs25_idisp_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_cavs25_idisp_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_idisp_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_idisp_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_idisp_tplg",
+    ":f_sof_ipc4_tplg_sof_hda_generic_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id6_tplg",
+    ":f_sof_ipc4_tplg_sof_hdmi_pcm5_id7_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l23_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l3_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_cs35l56_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_cs42l43_l2_cs35l56x6_l13_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_2ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_dmic_4ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt1318_l12_rt714_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt1320_l12_rt714_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt711_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt711_l0_rt1316_l23_rt714_l1_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt712_l2_rt1320_l1_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt712_l2_rt1712_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt713_l0_rt1318_l1_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt713_l0_rt1318_l1_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt713_l2_rt1320_l13_tplg",
+    ":f_sof_ipc4_tplg_sof_lnl_rt722_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs35l56_l01_fb6_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs35l56_l01_fb8_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_cs35l56_l12_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_cs35l56_l23_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs42l43_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_cs42l43_l3_cs35l56_l01_spkagg_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_2ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_dmic_4ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_es83x6_ssp1_hdmi_ssp02_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_es83x6_ssp1_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_hdmi_ssp02_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_google_aec_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_2ch_pdm1_google_aec_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_2ch_pdm1_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_google_aec_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_ssp2_ssp0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98357a_rt5682_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_max98360a_rt5682_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt1019_rt5682_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt1318_l12_rt714_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt5650_dts_google_aec_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt5650_dts_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt5650_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l23_rt714_l1_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt711_l0_rt1316_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt712_l0_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt712_l0_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt712_l0_rt1712_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt712_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt712_vb_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1316_l12_rt1713_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1316_l12_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1318_l1_rt1713_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt713_l0_rt1318_l12_rt1713_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_rt722_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_mtl_sdw_cs42l42_l0_max98363_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_cs42l43_agg_l3_cs35l56_l2_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_cs42l43_agg_l3_cs35l56_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_cs42l43_l2_cs35l56x6_l13_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_2ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_dmic_4ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_es8336_ssp1_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_es83x6_ssp1_hdmi_ssp02_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_hdmi_ssp02_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt711_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt711_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt711_rt1308_mono_rt715_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt711_rt1308_rt715_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt711_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt712_l2_rt1320_l1_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l2_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l3_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt712_l3_rt1320_l3_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt713_l2_rt1320_l13_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt713_l3_rt1320_l12_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt715_rt711_rt1308_mono_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt721_4ch_96k_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt721_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt721_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_192k_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_96k_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_2ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_l0_rt1320_l23_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_rt722_tplg",
+    ":f_sof_ipc4_tplg_sof_ptl_tas2563_rt5682_tplg",
+    ":f_sof_ipc4_tplg_sof_rpl_cs42l43_l0_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_1amp_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_2amp_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_3amp_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_4amp_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_jack_id0_tplg",
+    ":f_sof_ipc4_tplg_sof_sdca_mic_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_sdw_generic_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_cs35l56_l01_fb8_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_cs42l43_l3_cs35l56_l01_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_rt711_rt1308_4ch_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_rt711_rt1308_rt715_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_rt711_rt1316_rt714_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_rt712_tplg",
+    ":f_sof_ipc4_tplg_sof_tgl_rt715_rt711_rt1308_mono_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_2ch_id5_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id2_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id3_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id4_tplg",
+    ":f_sof_ipc4_tplg_sof_wcl_dmic_4ch_id5_tplg",
+    ":f_sof_ipc4_ptl_sof_ptl_openmodules_ri",
+    ":f_sof_ipc4_ptl_sof_ptl_ri",
+  ]
+}

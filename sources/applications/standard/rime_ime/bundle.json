@@ -1,0 +1,38 @@
+{
+  "name": "@ohos/rime_ime",
+  "description": "Rime input method (librime N-API bridge + ArkTS IME extension) for the OpenHarmony PC image",
+  "homePage": "https://gitee.com/openharmony",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "repository": "https://gitee.com/openharmony/applications_standard",
+  "supplier": "Organization: OpenHarmony",
+  "publishAs": "code-segment",
+  "segment": {
+    "destPath": "applications/standard/rime_ime"
+  },
+  "dirs": {},
+  "scripts": {},
+  "component": {
+    "name": "pc_rime_ime",
+    "subsystem": "applications",
+    "features": [],
+    "adapted_system_type": [
+      "standard"
+    ],
+    "rom": "20MB",
+    "ram": "",
+    "deps": {
+      "components": [
+        "c_utils"
+      ],
+      "third_party": []
+    },
+    "build": {
+      "sub_component": [
+        "//applications/standard/rime_ime:pc_rime_ime"
+      ],
+      "inner_kits": [],
+      "test": []
+    }
+  }
+}

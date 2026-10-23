@@ -1,0 +1,139 @@
+{
+  "product_name": "pc_ptl",
+  "device_company": "pc",
+  "device_build_path": "device/pc/ptl/linux_full",
+  "target_cpu": "x86_64",
+  "type": "standard",
+  "version": "3.0",
+  "board": "ptl",
+  "api_version": 8,
+  "enable_ramdisk": true,
+  "enable_absystem": false,
+  "ext_sanitizer_check_list_path": "vendor/ohemu/virt/security_config/sanitizer_check_list.gni",
+  "build_selinux": true,
+  "build_seccomp": false,
+  "inherit": [
+    "productdefine/common/inherit/rich.json",
+    "productdefine/common/inherit/chipset_common.json",
+    "vendor/ohemu/virt/virt_common_x86_64.json"
+  ],
+  "subsystems": [
+    {
+      "subsystem": "thirdparty",
+      "components": [
+        { "component": "rust_libc", "features": [] },
+        { "component": "typescript", "features": [] },
+        { "component": "libusb", "features": [] },
+        { "component": "expat", "features": [] },
+        { "component": "alsa-lib", "features": [ "alsa_lib_feature_config_enable = true" ] },
+        { "component": "alsa-utils", "features": [] },
+        { "component": "pcre2", "features": [] },
+        { "component": "vma", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "sdk",
+      "components": [
+        { "component": "sdk", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "developtools",
+      "components": [
+        { "component": "ace_ets2bundle", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "arkcompiler",
+      "components": [
+        {
+          "component": "ets_runtime",
+          "features": [ "ets_runtime_feature_enable_static_backtrace = false" ]
+        },
+        {
+          "component": "runtime_core",
+          "features": [ "runtime_core_enable_codegen = false" ]
+        }
+      ]
+    },
+    {
+      "subsystem": "graphic",
+      "components": [
+        {
+          "component": "graphic_2d",
+          "features": [
+            "graphic_2d_feature_rs_enable_eglimage = true",
+            "graphic_2d_feature_use_igraphics_extend_hooks = false",
+            "graphic_2d_feature_enable_opengl = true",
+            "graphic_2d_feature_ace_enable_gpu = true",
+            "graphic_2d_feature_rs_enable_uni_render = true",
+            "graphic_2d_feature_use_texgine = true"
+          ]
+        },
+        { "component": "graphics_effect", "features": [] },
+        { "component": "graphic_surface", "features": [] },
+        { "component": "graphic_utils_lite", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "window",
+      "components": [
+        {
+          "component": "window_manager",
+          "features": [ "window_manager_use_sceneboard = true" ],
+          "syscap": [ "SystemCapability.Window.SessionManager = true" ]
+        }
+      ]
+    },
+    {
+      "subsystem": "hdf",
+      "components": [
+        { "component": "drivers_tools", "features": [] },
+        { "component": "drivers_interface_bluetooth", "features": [] },
+        { "component": "drivers_devhost", "features": [] },
+        {
+          "component": "drivers_peripheral_camera",
+          "features": [ "drivers_peripheral_camera_v4l2_emulator=false" ]
+        },
+        {
+          "component": "drivers_peripheral_display",
+          "features": [ "drivers_peripheral_display_bootstrap_hotplug=true" ]
+        }
+      ]
+    },
+    {
+      "subsystem": "tee",
+      "components": [
+        { "component": "tee_client", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "security",
+      "components": [
+        {
+          "component": "selinux_adapter",
+          "features": [ "selinux_adapter_enforce=false" ]
+        }
+      ]
+    },
+    {
+      "subsystem": "device_ptl",
+      "components": [
+        { "component": "pc_ptl_full", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "applications",
+      "components": [
+        { "component": "pc_terminal", "features": [] },
+        { "component": "pc_rime_ime", "features": [] }
+      ]
+    },
+    {
+      "subsystem": "startup",
+      "components": [
+        { "component": "pc_ohos_diag", "features": [] }
+      ]
+    }
+  ]
+}

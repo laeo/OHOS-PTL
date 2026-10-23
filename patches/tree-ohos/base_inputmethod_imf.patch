@@ -1,0 +1,572 @@
+diff --git a/services/dialog/entry/src/main/ets/ServiceExtAbility/ServiceExtAbility.ts b/services/dialog/entry/src/main/ets/ServiceExtAbility/ServiceExtAbility.ts
+index 9b8f6aed..138ed9e7 100644
+--- a/services/dialog/entry/src/main/ets/ServiceExtAbility/ServiceExtAbility.ts
++++ b/services/dialog/entry/src/main/ets/ServiceExtAbility/ServiceExtAbility.ts
+@@ -35,26 +35,31 @@ interface DialogRect {
+   height: number;
+ }
+ 
+-const DISPLAY_SCALE: number = 0.35;
+-const MIN_SIZE: number = 350;
+-const MAX_SZIE: number = 550;
+-const DIALOG_POSITION_X: number = 50;
+-const DIALOG_POSITION_Y_SCALE: number = 0.3;
++const MIN_SCREEN: number = 100;
++/**
++ * Hard safety net: the chooser is a transient helper, it must never stay on screen
++ * and block the desktop, so it closes itself even if no user interaction happens.
++ */
++const AUTO_CLOSE_MS: number = 120000;
+ const DEFAULT_DIALOG_RECT: DialogRect = {
+-  left: DIALOG_POSITION_X,
+-  top: DIALOG_POSITION_X,
+-  width: MIN_SIZE,
+-  height: MIN_SIZE
++  left: 0,
++  top: 0,
++  width: MIN_SCREEN,
++  height: MIN_SCREEN
+ };
+ 
+ export default class ServiceExtAbility extends ServiceExtensionAbility {
+   private extensionWin: window.Window | undefined = undefined;
+   private mContext: common.ServiceExtensionContext | undefined = undefined;
+   private windowNum: number = 0;
++  private released: boolean = false;
++  private autoCloseTimer: number = -1;
++  private subscriber: commonEvent.CommonEventSubscriber | undefined = undefined;
+ 
+   onCreate(want: Want): void {
+     console.log(TAG, 'onCreate');
+     this.windowNum = 0;
++    this.released = false;
+     this.mContext = this.context;
+   }
+ 
+@@ -62,15 +67,16 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+     console.log(TAG, 'onRequest execute');
+     let dialogRect: DialogRect = DEFAULT_DIALOG_RECT;
+     try {
++      // The chooser is rendered as a full-screen transparent scrim + a centred card,
++      // so the window itself spans the whole display. This is what makes "tap
++      // outside to dismiss" work, and it also guarantees the dialog is never
++      // partially off-screen on small/large displays.
+       let defaultDisplay = display.getDefaultDisplaySync();
+-      let size = defaultDisplay.width * DISPLAY_SCALE > MIN_SIZE ? defaultDisplay.width * DISPLAY_SCALE : MIN_SIZE;
+-      size = size < MAX_SZIE ? size : MAX_SZIE;
+-      let dialogTop = defaultDisplay.height * DIALOG_POSITION_Y_SCALE;
+       dialogRect = {
+-        left: DIALOG_POSITION_X,
+-        top: dialogTop,
+-        width: size,
+-        height: size
++        left: 0,
++        top: 0,
++        width: defaultDisplay.width,
++        height: defaultDisplay.height
+       };
+     } catch (error) {
+       console.error(TAG + 'getDefaultDisplaySync error use default dialogRect:' + JSON.stringify(error));
+@@ -85,9 +91,14 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+     });
+ 
+     commonEvent.createSubscriber(subscribeInfo, (error: BusinessError, subcriber: commonEvent.CommonEventSubscriber) => {
++      if (error) {
++        console.log(TAG + `createSubscriber error, errorCode: ${error.code}`);
++        return;
++      }
++      this.subscriber = subcriber;
+       commonEvent.subscribe(subcriber, (error: BusinessError, commonEventData: commonEvent.CommonEventData) => {
+         if (error) {
+-          console.log(TAG + `commonEvent subscribe error, errorCode: ${error}`);
++          console.log(TAG + `commonEvent subscribe error, errorCode: ${error.code}`);
+           return;
+         }
+         if (commonEventData?.event === PACKAGE_ADDED || commonEventData?.event === PACKAGE_REMOVED) {
+@@ -103,7 +114,7 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+   }
+ 
+   private async createWindow(config: window.Configuration, rect: DialogRect): Promise<void> {
+-    console.log(TAG + 'createWindow execute');
++    console.log(TAG, 'createWindow execute');
+     try {
+       if (this.windowNum > 0) {
+         this.updateImeList();
+@@ -111,7 +122,7 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+       }
+       try {
+         this.extensionWin = await window.createWindow(config);
+-        console.info(TAG + 'Succeeded in creating the window. Data: ' + JSON.stringify(this.extensionWin));
++        console.info(TAG + 'Succeeded in creating the window.');
+         this.extensionWin.on('windowEvent', async (data: window.WindowEventType) => {
+           console.log(TAG + 'windowEvent:' + JSON.stringify(data));
+           if (data === window.WindowEventType.WINDOW_INACTIVE) {
+@@ -120,18 +131,33 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+         });
+         await this.extensionWin.moveWindowTo(rect.left, rect.top);
+         await this.extensionWin.resize(rect.width, rect.height);
++        // Transparent window background: only the card drawn by the page is opaque,
++        // so the desktop stays visible and the scrim catches outside taps.
++        await this.extensionWin.setWindowBackgroundColor('#00000000');
+         await this.extensionWin.setUIContent('pages/index');
+         await this.extensionWin.showWindow();
+         this.windowNum++;
++        this.armAutoClose();
+         console.log(TAG + 'window create successfully');
+       } catch (exception) {
+-        console.error('Failed to create the window. Cause: ' + JSON.stringify(exception));
++        console.error(TAG + 'Failed to create the window. Cause: ' + JSON.stringify(exception));
++        await this.releaseContext();
+       }
+     } catch {
+       console.info(TAG + 'window create failed');
+     }
+   }
+ 
++  private armAutoClose(): void {
++    if (this.autoCloseTimer >= 0) {
++      return;
++    }
++    this.autoCloseTimer = setTimeout(() => {
++      console.log(TAG + 'auto close after ' + AUTO_CLOSE_MS + 'ms');
++      this.releaseContext();
++    }, AUTO_CLOSE_MS);
++  }
++
+   private async getInputMethods(): Promise<void> {
+     let inputMethodList: Array<inputMethod.InputMethodProperty> = [];
+     try {
+@@ -146,7 +172,7 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+ 
+   private async updateImeList(): Promise<void> {
+     await this.getInputMethods().then(async () => {
+-      if (this.extensionWin) {
++      if (this.extensionWin !== undefined && !this.released) {
+         await this.extensionWin.setUIContent('pages/index');
+         if (!this.extensionWin.isWindowShowing()) {
+           await this.extensionWin.showWindow();
+@@ -155,8 +181,31 @@ export default class ServiceExtAbility extends ServiceExtensionAbility {
+     });
+   }
+ 
++  /** Idempotent teardown: safe to call from page dismiss, WINDOW_INACTIVE, auto-close and onDestroy. */
+   public async releaseContext(): Promise<void> {
+-    await this.extensionWin?.destroyWindow();
++    if (this.released) {
++      return;
++    }
++    this.released = true;
++    if (this.autoCloseTimer >= 0) {
++      clearTimeout(this.autoCloseTimer);
++      this.autoCloseTimer = -1;
++    }
++    if (this.subscriber !== undefined) {
++      try {
++        commonEvent.unsubscribe(this.subscriber);
++      } catch {
++        console.log(TAG + 'unsubscribe failed');
++      }
++      this.subscriber = undefined;
++    }
++    try {
++      await this.extensionWin?.destroyWindow();
++    } catch {
++      console.log(TAG + 'destroyWindow failed');
++    }
++    this.extensionWin = undefined;
++    this.windowNum = 0;
+     await this.mContext?.terminateSelf();
+   }
+ };
+\ No newline at end of file
+diff --git a/services/dialog/entry/src/main/ets/pages/index.ets b/services/dialog/entry/src/main/ets/pages/index.ets
+index 9790f5ad..d348f49e 100644
+--- a/services/dialog/entry/src/main/ets/pages/index.ets
++++ b/services/dialog/entry/src/main/ets/pages/index.ets
+@@ -16,90 +16,253 @@ import common from '@ohos.app.ability.common';
+ import inputMethod from '@ohos.inputMethod';
+ import prompt from '@ohos.promptAction';
+ import { BusinessError } from '@ohos.base';
++import { KeyCode } from '@ohos.multimodalInput.keyCode';
+ 
+-const EXIT_TIME = 1000;
++const TAG: string = '[InputMethodChooseDialog]';
++/** Card geometry: fixed width, height follows the item count (content adaptive). */
++const CARD_WIDTH: number = 380;
++const CARD_MIN_HEIGHT: number = 180;
++const CARD_PADDING: number = 20;
++const ITEM_HEIGHT: number = 48;
++const ITEM_RADIUS: number = 12;
++
++interface ImeItem {
++  bundle: string;
++  label: string;
++  id: string;
++  current: boolean;
++}
+ 
+ @Entry
+ @Component
+ struct Index {
+-  private arr: string[] = [];
+-  private propertyMap: Map<string, inputMethod.InputMethodProperty> = new Map();
+-  @StorageLink('inputMethodList') inputMethods: Array<inputMethod.InputMethodProperty> | undefined = [];
+-  private TAG = '[InputMethodChooseDialog]';
++  private ctx: common.ServiceExtensionContext | undefined = undefined;
++  private currentBundle: string = '';
++  @State private items: ImeItem[] = [];
++  @State private loading: boolean = true;
++
++  aboutToAppear(): void {
++    console.log(TAG, 'dialog page appears');
++    this.ctx = getContext(this) as common.ServiceExtensionContext;
++    this.reload();
++  }
+ 
+-  aboutToAppear() {
+-    console.log(this.TAG, 'dialog page appears')
+-    this.inputMethods = AppStorage.get('inputMethodList');
+-    if (this.inputMethods) {
+-      for (let inputmethod of this.inputMethods) {
+-        let name = inputmethod.packageName;
+-        this.arr.push(name);
+-        this.propertyMap.set(name, inputmethod);
++  private async reload(): Promise<void> {
++    let list: ImeItem[] = [];
++    try {
++      this.currentBundle = inputMethod.getCurrentInputMethod()?.name ?? '';
++    } catch (err) {
++      console.log(TAG + 'getCurrentInputMethod failed ' + JSON.stringify(err));
++    }
++    try {
++      let enabled: inputMethod.InputMethodProperty[] =
++        await inputMethod.getSetting().getInputMethods(true);
++      for (let prop of enabled) {
++        if (prop === undefined || prop.name === undefined || prop.name.length === 0) {
++          continue;
++        }
++        let label: string = prop.name.split('.')[prop.name.split('.').length - 1];
++        list.push({
++          bundle: prop.name,
++          label: this.validLabel(prop.label) ? (prop.label as string) : label,
++          id: prop.id ?? '',
++          current: prop.name === this.currentBundle
++        });
+       }
++    } catch (err) {
++      console.log(TAG + 'getInputMethods failed ' + JSON.stringify(err));
++    }
++    // Fall back to the AppStorage list published by the extension ability.
++    if (list.length === 0) {
++      let cached: inputMethod.InputMethodProperty[] | undefined = AppStorage.get('inputMethodList');
++      if (cached !== undefined) {
++        for (let prop of cached) {
++          let name: string = prop.packageName;
++          list.push({
++            bundle: name,
++            label: name.split('.')[name.split('.').length - 1],
++            id: '',
++            current: name === this.currentBundle
++          });
++        }
++      }
++    }
++    this.items = list;
++    this.loading = false;
++    console.log(TAG + 'input method list size=' + list.length);
++  }
++
++  private validLabel(value?: string): boolean {
++    return value !== undefined && value.length > 0 && value.charAt(0) !== '$';
++  }
++
++  /** Single exit path: used by ESC / back / cancel button / outside tap / item pick. */
++  private dismiss(): void {
++    console.log(TAG, 'dismiss');
++    if (this.ctx !== undefined) {
++      this.ctx.terminateSelf();
+     }
+   }
+ 
+-  onPrint(): void {
+-    console.log(this.TAG + 'print file or text');
++  private chooseInputMethods(prop: inputMethod.InputMethodProperty): void {
++    inputMethod.switchInputMethod(prop).then(() => {
++      console.log(TAG + 'switchInputMethod success');
++      prompt.showToast({ message: 'switch success', duration: 200 });
++    }).catch((err: BusinessError) => {
++      console.log(TAG + 'switchInputMethod failed ' + JSON.stringify(err));
++      prompt.showToast({ message: 'switch failed', duration: 200 });
++    }).finally(() => {
++      this.dismiss();
++    });
++  }
++
++  private onItemClick(index: number): void {
++    if (index < 0 || index >= this.items.length) {
++      this.dismiss();
++      return;
++    }
++    let bundle: string = this.items[index].bundle;
++    // Look up the full property again: switchInputMethod() needs a real InputMethodProperty.
++    inputMethod.getSetting().getInputMethods(true).then((list: inputMethod.InputMethodProperty[]) => {
++      for (let prop of list) {
++        if (prop.name === bundle) {
++          this.chooseInputMethods(prop);
++          return;
++        }
++      }
++      this.dismiss();
++    }).catch(() => {
++      this.dismiss();
++    });
+   }
+ 
+-  onCopy(): void {
+-    console.log(this.TAG + 'copy file and html');
++  @Builder
++  ItemRow(item: ImeItem, index: number) {
++    Row() {
++      Column({ space: 2 }) {
++        Text(item.label)
++          .fontSize(16)
++          .fontWeight(FontWeight.Medium)
++          .fontColor($r('sys.color.ohos_id_color_text_primary'))
++        Text(item.id.length > 0 ? item.id : item.bundle)
++          .fontSize(11)
++          .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
++      }
++      .alignItems(HorizontalAlign.Start)
++      .layoutWeight(1)
++
++      if (item.current) {
++        Text($r('sys.symbol.checkmark'))
++          .fontSize(18)
++          .fontColor($r('sys.color.ohos_id_color_emphasize'))
++      }
++    }
++    .width('100%')
++    .height(ITEM_HEIGHT)
++    .padding({ left: 14, right: 14 })
++    .borderRadius(ITEM_RADIUS)
++    .backgroundColor(item.current ?
++      $r('sys.color.ohos_id_color_sub_background') : $r('sys.color.ohos_id_color_list_card_bg'))
++    .onClick(() => {
++      this.onItemClick(index);
++    })
+   }
+ 
+   build() {
+-    Column() {
+-      List({ space: 1, initialIndex: 0 }) {
+-        ListItem() {
++    Stack() {
++      // Full-screen scrim: tapping anywhere outside the card dismisses the dialog,
++      // so the dialog can never block the desktop.
++      Column()
++        .width('100%')
++        .height('100%')
++        .backgroundColor('#00000000')
++        .hitTestBehavior(HitTestMode.Block)
++        .onClick(() => {
++          this.dismiss();
++        })
++
++      Column({ space: 12 }) {
++        // Header
++        Row() {
+           Text($r('app.string.dialogTitle'))
+-            .width('100%')
+-            .height(40)
+-            .fontSize(14)
++            .fontSize(18)
++            .fontWeight(FontWeight.Bold)
++            .fontColor($r('sys.color.ohos_id_color_text_primary'))
++            .layoutWeight(1)
++          Text($r('sys.symbol.xmark'))
++            .fontSize(18)
++            .fontColor($r('sys.color.ohos_id_color_text_primary'))
++            .width(28)
++            .height(28)
+             .textAlign(TextAlign.Center)
+-            .backgroundColor(Color.Pink)
+-        }.sticky(Sticky.Normal)
++            .borderRadius(14)
++            .backgroundColor($r('sys.color.ohos_id_color_list_card_bg'))
++            .onClick(() => {
++              this.dismiss();
++            })
++        }
++        .width('100%')
+ 
+-        ForEach(this.arr, (item: string, index: number) => {
+-          ListItem() {
+-            Text(item.split('.').length > 2 ? item.split('.')[2] : item.split('.')[-1])
+-              .width('100%')
+-              .height(50)
+-              .fontSize(16)
+-              .textAlign(TextAlign.Center)
+-              .borderRadius(10)
+-              .backgroundColor($r('app.color.btn_default'))
+-              .onClick(async () => {
+-                if (this.propertyMap.has(item)) {
+-                  let prop = this.propertyMap.get(item);
+-                  this.chooseInputMethods(prop);
+-                }
+-              })
++        if (this.loading) {
++          Row() {
++            LoadingProgress()
++              .width(24)
++              .height(24)
++              .color($r('sys.color.ohos_id_color_emphasize'))
+           }
+-          .sticky(0 == index ? Sticky.Opacity : Sticky.None)
+-        }, (item: string) => item)
+-      }
+-      .width('100%')
+-      .height('100%')
+-    }.width('100%').height('100%').backgroundColor(0xDCDCDC).padding({ top: 5 })
+-  }
++          .width('100%')
++          .height(72)
++          .justifyContent(FlexAlign.Center)
++        } else if (this.items.length === 0) {
++          Text($r('app.string.dialogEmpty'))
++            .fontSize(14)
++            .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
++            .width('100%')
++            .height(72)
++            .textAlign(TextAlign.Center)
++        } else {
++          List({ space: 8 }) {
++            ForEach(this.items, (item: ImeItem) => {
++              ListItem() {
++                this.ItemRow(item, this.items.indexOf(item))
++              }
++            }, (item: ImeItem) => item.bundle)
++          }
++          .width('100%')
++          .constraintSize({ maxHeight: ITEM_HEIGHT * 5 })
++          .scrollBar(BarState.Auto)
++        }
+ 
+-  chooseInputMethods(prop: inputMethod.InputMethodProperty): void {
+-    let context = getContext(this) as common.ServiceExtensionContext;
+-    inputMethod.switchInputMethod(prop).then(() => {
+-      console.log(this.TAG + 'switchInputMethod success');
+-      prompt.showToast({
+-        message: 'switch success', duration: 200
+-      });
+-      setTimeout(() => {
+-        context?.terminateSelf();
+-      }, EXIT_TIME);
+-    }).catch((err: BusinessError) => {
+-      if (!err) {
+-        console.log(this.TAG + 'switchInputMethod failed,' + JSON.stringify(err));
+-        prompt.showToast({
+-          message: 'switch failed', duration: 200
+-        });
++        // Footer
++        Button($r('app.string.dialogCancel'))
++          .width('100%')
++          .height(40)
++          .fontSize(15)
++          .backgroundColor($r('sys.color.ohos_id_color_list_card_bg'))
++          .fontColor($r('sys.color.ohos_id_color_text_primary'))
++          .onClick(() => {
++            this.dismiss();
++          })
+       }
+-    });
++      .width(CARD_WIDTH)
++      .constraintSize({ minHeight: CARD_MIN_HEIGHT })
++      .padding(CARD_PADDING)
++      .borderRadius(24)
++      .backgroundColor($r('sys.color.ohos_id_color_dialog_bg'))
++      .shadow({ radius: 32, color: '#40000000', offsetX: 0, offsetY: 8 })
++    }
++    .width('100%')
++    .height('100%')
++    .alignContent(Alignment.Center)
++    .onKeyEvent((event: KeyEvent): boolean => {
++      if (event.type !== KeyType.Down) {
++        return false;
++      }
++      if (event.keyCode === KeyCode.KEYCODE_ESCAPE || event.keyCode === KeyCode.KEYCODE_BACK) {
++        this.dismiss();
++        return true;
++      }
++      return false;
++    })
+   }
+ }
+\ No newline at end of file
+diff --git a/services/dialog/entry/src/main/resources/base/element/string.json b/services/dialog/entry/src/main/resources/base/element/string.json
+index bf04710c..96541647 100644
+--- a/services/dialog/entry/src/main/resources/base/element/string.json
++++ b/services/dialog/entry/src/main/resources/base/element/string.json
+@@ -15,6 +15,14 @@
+     {
+       "name": "dialogTitle",
+       "value": "Select keyboard"
++    },
++    {
++      "name": "dialogCancel",
++      "value": "Cancel"
++    },
++    {
++      "name": "dialogEmpty",
++      "value": "No input method available"
+     }
+   ]
+ }
+\ No newline at end of file
+diff --git a/services/dialog/entry/src/main/resources/zh_CN/element/string.json b/services/dialog/entry/src/main/resources/zh_CN/element/string.json
+index f345f5a0..5317ee7e 100644
+--- a/services/dialog/entry/src/main/resources/zh_CN/element/string.json
++++ b/services/dialog/entry/src/main/resources/zh_CN/element/string.json
+@@ -15,6 +15,14 @@
+     {
+       "name": "dialogTitle",
+       "value": "选择输入法"
++    },
++    {
++      "name": "dialogCancel",
++      "value": "取消"
++    },
++    {
++      "name": "dialogEmpty",
++      "value": "没有可用的输入法"
+     }
+   ]
+ }
+\ No newline at end of file
+diff --git a/services/dialog/entry/src/main/resources/zh_TW/element/string.json b/services/dialog/entry/src/main/resources/zh_TW/element/string.json
+index f9a5dd62..c1df03f7 100644
+--- a/services/dialog/entry/src/main/resources/zh_TW/element/string.json
++++ b/services/dialog/entry/src/main/resources/zh_TW/element/string.json
+@@ -1,8 +1,16 @@
+ {
+-    "string":[
+-        {
+-            "name": "dialogTitle",
+-            "value": "選取輸入法"
+-        }
+-    ]
++  "string": [
++    {
++      "name": "dialogTitle",
++      "value": "選取輸入法"
++    },
++    {
++      "name": "dialogCancel",
++      "value": "取消"
++    },
++    {
++      "name": "dialogEmpty",
++      "value": "沒有可用的輸入法"
++    }
++  ]
+ }
+\ No newline at end of file

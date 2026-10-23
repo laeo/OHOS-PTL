@@ -1,0 +1,220 @@
+diff --git a/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets b/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets
+index 296f7d4311..207cf9406e 100644
+--- a/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets
++++ b/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/model/KeyboardController.ets
+@@ -59,6 +59,12 @@ const KEYBOARD_HEIGHT_RATE_BIG_LAND: number = 0.38;
+ const KEYBOARD_HEIGHT_RATE_BIG: number = 0.3;
+ // 定义默认的底部导航栏高度
+ const NAVIGATIONBAR_HEIGHT_DEFAULT: number = 72;
++// On PC/2in1 devices the IME panel is FLG_FIXED and always spans the full screen width. The
++// phone-sized key resources are laid out with SpaceBetween, so on a very wide screen the keys
++// end up tiny and scattered. The keyboard content is capped to a sane width (see Index.ets)
++// and the panel height is derived from that width so the keyboard stays usable.
++const MAX_KEYBOARD_WIDTH: number = 1280;
++const MAX_KEY_HEIGHT_RATE: number = 0.31;
+ 
+ export class InputHandler {
+   private mKbController: inputMethodEngine.KeyboardController | undefined;
+@@ -229,6 +235,7 @@ export class KeyboardController {
+   private isKeyboardShow: boolean = false;
+   private inputHandle: InputHandler = InputHandler.getInstance();
+   private mKeyboardDelegate: inputMethodEngine.KeyboardDelegate | undefined;
++  private panelWidth: number = 0;
+ 
+   constructor(context: InputMethodExtensionContext) {
+     this.inputHandle.addLog('constructor');
+@@ -286,8 +293,12 @@ export class KeyboardController {
+       keyHeightRate = KEYBOARD_HEIGHT_RATE_BIG;
+     }
+     let keyHeight = dHeight * keyHeightRate;
++    this.panelWidth = this.getPanelWidth(dWidth);
++    if (this.panelWidth < dWidth && keyHeight > this.panelWidth * MAX_KEY_HEIGHT_RATE) {
++      keyHeight = this.panelWidth * MAX_KEY_HEIGHT_RATE;
++    }
+     this.barPosition = dHeight - keyHeight - navigationbar_height;
+-    this.inputHandle.addLog(`initWindow-dWidth = ${dWidth};dHeight = ${dHeight};keyboard height = ${keyHeight};;navibar height = navigationbar_height`);
++    this.inputHandle.addLog(`initWindow-dWidth = ${dWidth};dHeight = ${dHeight};keyboard height = ${keyHeight};panel width = ${this.panelWidth};navibar height = navigationbar_height`);
+     let panelInfo: inputMethodEngine.PanelInfo = {
+       type: inputMethodEngine.PanelType.SOFT_KEYBOARD,
+       flag: inputMethodEngine.PanelFlag.FLG_FIXED
+@@ -306,6 +317,10 @@ export class KeyboardController {
+     })
+   }
+ 
++  private getPanelWidth(screenWidth: number): number {
++    return screenWidth > MAX_KEYBOARD_WIDTH ? MAX_KEYBOARD_WIDTH : screenWidth;
++  }
++
+   private destroyPanel(): void {
+     this.inputHandle.addLog('destroyPanel');
+     try {
+@@ -352,6 +367,10 @@ export class KeyboardController {
+       keyHeightRate = KEYBOARD_HEIGHT_RATE_BIG;
+     }
+     let keyHeight = dHeight * keyHeightRate;
++    let panelWidth = this.getPanelWidth(dWidth);
++    if (panelWidth < dWidth && keyHeight > panelWidth * MAX_KEY_HEIGHT_RATE) {
++      keyHeight = panelWidth * MAX_KEY_HEIGHT_RATE;
++    }
+     let inputStyle = StyleConfiguration.getInputStyle(isLandscape, isRkDevice, DEVICE_TYPE);
+     AppStorage.setOrCreate('inputStyle', inputStyle);
+     if (this.panel) {
+diff --git a/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/pages/Index.ets b/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/pages/Index.ets
+index 4e04d2423e..e9ed858683 100644
+--- a/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/pages/Index.ets
++++ b/code/Solutions/InputMethod/KikaInput/entry/src/main/ets/pages/Index.ets
+@@ -30,6 +30,10 @@ import lazy { SymbolMenu } from '../components/SymbolMenu';
+ import lazy { TopMenu } from '../components/TopMenu';
+ 
+ const TAG: string = 'index->';
++// The soft keyboard panel is FLG_FIXED and spans the full screen width. On wide PC/2in1
++// screens this would scatter the phone-sized keys across the whole width, so cap the keyboard
++// content width and let the Stack center it.
++const MAX_KEYBOARD_WIDTH_PX: number = 1280;
+ 
+ @Entry
+ @Component
+@@ -65,14 +69,17 @@ struct Index {
+     Stack() {
+       Column() {
+         TopMenu()
+-        Column() {
+-          if (this.menuType === MenuType.NORMAL) {
+-            KeyMenu({ keyList: this.keyList })
+-          } else if (this.menuType === MenuType.NUMBER) {
+-            NumberMenu({ numberList: this.numberList, })
+-          } else {
+-            SymbolMenu({ symbolList: this.symbolList, })
++        Row() {
++          Column() {
++            if (this.menuType === MenuType.NORMAL) {
++              KeyMenu({ keyList: this.keyList })
++            } else if (this.menuType === MenuType.NUMBER) {
++              NumberMenu({ numberList: this.numberList, })
++            } else {
++              SymbolMenu({ symbolList: this.symbolList, })
++            }
+           }
++          .width(px2vp(MAX_KEYBOARD_WIDTH_PX))
+         }
+         .width('100%')
+         .layoutWeight(1)
+@@ -80,8 +87,10 @@ struct Index {
+         .backgroundColor('#D5D8DD')
+       }
+       .height('100%')
++      .width('100%')
+     }
+     .height('100%')
++    .width('100%')
+     .backgroundColor(Color.White)
+   }
+ }
+\ No newline at end of file
+diff --git a/code/Solutions/InputMethod/KikaInput/entry/src/main/resources/base/element/float.json b/code/Solutions/InputMethod/KikaInput/entry/src/main/resources/base/element/float.json
+index 9fafad3e3c..01fe951e6f 100644
+--- a/code/Solutions/InputMethod/KikaInput/entry/src/main/resources/base/element/float.json
++++ b/code/Solutions/InputMethod/KikaInput/entry/src/main/resources/base/element/float.json
+@@ -235,7 +235,8 @@
+     {
+       "name": "rk_keyboard_height",
+       "value": "316vp"
+-    },{
++    },
++    {
+       "name": "downMenu_height",
+       "value": "62vp"
+     },
+@@ -270,6 +271,90 @@
+     {
+       "name": "keyboard_height",
+       "value": "338vp"
++    },
++    {
++      "name": "s_basic_button_width",
++      "value": "30vp"
++    },
++    {
++      "name": "h_basic_button_width",
++      "value": "67.68vp"
++    },
++    {
++      "name": "s_basic_button_height",
++      "value": "44vp"
++    },
++    {
++      "name": "h_basic_button_height",
++      "value": "37.4vp"
++    },
++    {
++      "name": "s_feature_picSize",
++      "value": "24vp"
++    },
++    {
++      "name": "h_feature_picSize",
++      "value": "32vp"
++    },
++    {
++      "name": "s_switch_button_width",
++      "value": "44vp"
++    },
++    {
++      "name": "h_switch_button_width",
++      "value": "101.83vp"
++    },
++    {
++      "name": "return_picSize",
++      "value": "28vp"
++    },
++    {
++      "name": "s_return_button_widthType_1",
++      "value": "80.2vp"
++    },
++    {
++      "name": "h_return_button_widthType_1",
++      "value": "180vp"
++    },
++    {
++      "name": "s_return_button_widthType_2",
++      "value": "80.2vp"
++    },
++    {
++      "name": "h_return_button_widthType_2",
++      "value": "101.83vp"
++    },
++    {
++      "name": "s_space_button_width_1",
++      "value": "138.6vp"
++    },
++    {
++      "name": "h_space_button_width_1",
++      "value": "308vp"
++    },
++    {
++      "name": "s_space_button_width_2",
++      "value": "66.2vp"
++    },
++    {
++      "name": "h_space_button_width_2",
++      "value": "228vp"
++    },
++    {
++      "name": "s_padding_top",
++      "value": "12vp"
++    },
++    {
++      "name": "h_padding_top",
++      "value": "7.4vp"
++    },
++    {
++      "name": "s_padding_left_right",
++      "value": "6vp"
++    },
++    {
++      "name": "h_padding_left_right",
++      "value": "6vp"
+     }
+   ]
+-}
+\ No newline at end of file
++}

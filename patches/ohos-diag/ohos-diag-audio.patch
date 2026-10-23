@@ -1,0 +1,52 @@
+--- out/x86_64_virt/ohos-dbg/fix_hwdec2/evidence/ohos-diag.old	2026-10-22 12:02:51.268956882 +0800
++++ base/startup/ohos_diag/ohos-diag	2026-10-22 11:52:52.039317714 +0800
+@@ -1193,14 +1193,38 @@
+         v FAIL "audio/master-playback-volume" "amixer -c0 cget name='Master Playback Volume' failed"
+     fi
+     rm -f "$_amix" 2>/dev/null
++    # --- playback checks ------------------------------------------------------
++    # NOTE: on a real device the ALSA device is opened EXCLUSIVELY by
++    # audio_host (the OHOS audio server), therefore "aplay -D default" fails
++    # with "audio open error: Resource busy" -- that is NOT a fault.
++    #   1) "null"  -> proves alsa-lib + the PCM path work
++    #   2) "default" -> tells us who owns the device (exclusive owner = audio_host)
++    _aplnull="$W/.aplay_null"
++    timeout_cmd 20 aplay -D null -t raw -f S16_LE -r 8000 -c 1 /dev/zero > "$_aplnull" 2>&1
++    if grep -aqE 'Playing WAVE|playing' "$_aplnull" 2>/dev/null; then
++        v PASS "audio/aplay-null-playback" "aplay -D null works (alsa + PCM path OK)"
++    else
++        v FAIL "audio/aplay-null-playback" "aplay -D null failed: $(head -2 "$_aplnull" 2>/dev/null | oneline)"
++    fi
++    rm -f "$_aplnull" 2>/dev/null
++    _ahost=$(pidof audio_host 2>/dev/null)
+     _apl="$W/.aplay_test"
+     timeout_cmd 20 aplay -D default -t raw -f S16_LE -r 8000 -c 1 /dev/zero > "$_apl" 2>&1
+     if grep -aqE 'Playing WAVE|playing' "$_apl" 2>/dev/null; then
+         v PASS "audio/aplay-default-playback" "aplay -D default works"
++    elif grep -aqi 'Resource busy' "$_apl" 2>/dev/null && [ -n "$_ahost" ]; then
++        v PASS "audio/aplay-default-playback" "device busy: held exclusively by audio_host (pid $_ahost), not a fault"
++    elif grep -aqi 'Resource busy' "$_apl" 2>/dev/null; then
++        v WARN "audio/aplay-default-playback" "device busy but audio_host is not running"
+     else
+         v FAIL "audio/aplay-default-playback" "aplay -D default failed: $(head -2 "$_apl" 2>/dev/null | oneline)"
+     fi
+     rm -f "$_apl" 2>/dev/null
++    if [ -n "$_ahost" ]; then
++        v PASS "audio/device-exclusive-owner" "audio_host running (pid $_ahost) -> ALSA device is used exclusively by the OHOS audio server"
++    else
++        v SKIP "audio/device-exclusive-owner" "audio_host not running"
++    fi
+     _admesg=/sys_prod/dmesg_boot_t0.log
+     [ -f "$_admesg" ] || _admesg=/data/dmesg_boot_t0.log
+     if [ -f "$_admesg" ]; then
+@@ -2267,7 +2291,9 @@
+ 音频|audio/sofhdadsp-card-present|声卡 sofhdadsp|/proc/asound/cards 可见
+ 音频|audio/pcm-devices|ALSA PCM 设备|存在
+ 音频|audio/master-playback-volume|Master 音量控件|存在
+-音频|audio/aplay-default-playback|aplay -D default|播放成功
++音频|audio/aplay-null-playback|aplay -D null|alsa+PCM 通路可用
++音频|audio/aplay-default-playback|aplay -D default|播放成功，或设备被 audio_host 独占(Resource busy，非故障)
++音频|audio/device-exclusive-owner|设备独占者|audio_host 运行中
+ 音频|audio/zz-sof-reprobe-ran|SOF 重探测 (ZZSOF)|有诊断输出
+ 音频|audio/boot-dmesg-has-sof|开机 dmesg 含 SOF|有
+ 蓝牙|bt/hci-device-present|hci0 蓝牙设备|/sys/class/bluetooth 可见

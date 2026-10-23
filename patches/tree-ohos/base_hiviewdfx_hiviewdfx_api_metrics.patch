@@ -1,0 +1,56 @@
+diff --git a/manager/innerkits/include/plugin_manager.h b/manager/innerkits/include/plugin_manager.h
+index f638508..e0e2b6b 100644
+--- a/manager/innerkits/include/plugin_manager.h
++++ b/manager/innerkits/include/plugin_manager.h
+@@ -116,6 +116,15 @@ private:
+ 
+     /** @brief Atomic flag indicating whether the initialization process has completed. */
+     std::atomic<bool> pluginHasInit_ { false };
++
++    /**
++     * @brief Atomic flag indicating the plugin shared library is absent.
++     *
++     * When the histogram plugin .so does not exist on the device (the library
++     * is not shipped by this product), loading is disabled gracefully so the
++     * hot path neither retries dlopen() on every sample nor floods the log.
++     */
++    std::atomic<bool> pluginDisabled_ { false };
+ };
+ 
+ } // namespace histogram
+diff --git a/manager/innerkits/src/plugin_manager.cpp b/manager/innerkits/src/plugin_manager.cpp
+index c9211c4..7966ae7 100644
+--- a/manager/innerkits/src/plugin_manager.cpp
++++ b/manager/innerkits/src/plugin_manager.cpp
+@@ -17,6 +17,7 @@
+ #include "plugin_manager.h"
+ 
+ #include <dlfcn.h>
++#include <unistd.h>
+ 
+ #include "log_wrapper.h"
+ 
+@@ -66,6 +67,10 @@ bool PluginManager::LazyLoadPlugin()
+  */
+ bool PluginManager::LoadPluginIfNeeded(const std::string &path)
+ {
++    if (pluginDisabled_.load(std::memory_order_acquire)) {
++        return false;
++    }
++
+     if (pluginHasInit_.load(std::memory_order_acquire)) {
+         return true;
+     }
+@@ -104,6 +109,12 @@ bool PluginManager::LoadPluginLocked(const std::string &path)
+         return true;
+     }
+ 
++    if (access(path.c_str(), F_OK) != 0) {
++        AP_WARN_LOG("plugin_manager: histogram plugin absent, disabled, path=%{public}s", path.c_str());
++        pluginDisabled_.store(true, std::memory_order_release);
++        return false;
++    }
++
+     (void)dlerror();
+     void *handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+     if (handle == nullptr) {

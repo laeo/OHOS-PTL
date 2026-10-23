@@ -1,0 +1,12 @@
+# Rime default config for the OHOS Rime input method (rime-ice dictionary).
+# NOTE: only ONE schema may use `dictionary: rime_ice`. librime compiles the
+# <dict>.prism.bin once per deployment, and with two schemas sharing one dictionary the
+# double-pinyin schema wins the build, so the full-pinyin schema then resolves every
+# syllable through the flypy mapping ("shi" -> sang/cheng, "hao" -> ha+o). Keep the
+# schema list to the single full-pinyin scheme; see fix_rime_rebuild/SUMMARY.md §1.
+config_version: "1.0"
+schema_list:
+  - schema: rime_ice_ohos
+menu:
+  page_size: 7
+  alternative_select_labels: [ ①, ②, ③, ④, ⑤, ⑥, ⑦, ⑧, ⑨ ]

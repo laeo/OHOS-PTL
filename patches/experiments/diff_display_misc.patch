@@ -1,0 +1,430 @@
+diff --git a/common/virt_full/hardware/display/BUILD.gn b/common/virt_full/hardware/display/BUILD.gn
+index 4ae6c02..776f4df 100644
+--- a/common/virt_full/hardware/display/BUILD.gn
++++ b/common/virt_full/hardware/display/BUILD.gn
+@@ -71,6 +71,7 @@ ohos_shared_library("libdisplay_buffer_vendor") {
+   include_dirs = [
+     "include",
+     "./src/display_gralloc",
++    "./src/display_device",
+     "${root_path}/drivers/peripheral/base",
+     "${root_path}/drivers/interface/display/composer/hdifd_parcelable",
+     "${root_path}/drivers/peripheral/display/utils/include",
+diff --git a/common/virt_full/hardware/display/src/display_device/display_composer_vdi_impl.cpp b/common/virt_full/hardware/display/src/display_device/display_composer_vdi_impl.cpp
+index 59d2b99..8226fac 100644
+--- a/common/virt_full/hardware/display/src/display_device/display_composer_vdi_impl.cpp
++++ b/common/virt_full/hardware/display/src/display_device/display_composer_vdi_impl.cpp
+@@ -17,6 +17,7 @@
+ #include <hdf_base.h>
+ #include "display_log.h"
+ #include "hdf_log.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+@@ -31,7 +32,9 @@ DisplayComposerVdiImpl::~DisplayComposerVdiImpl()
+ 
+ int32_t DisplayComposerVdiImpl::RegHotPlugCallback(HotPlugCallback cb, void* data)
+ {
++    comp_kmsg::Print("VDI", "RegHotPlugCallback enter (about to HdiSession::GetInstance -> DRM discovery)");
+     HdiSession::GetInstance().RegHotPlugCallback(cb, data);
++    comp_kmsg::Print("VDI", "RegHotPlugCallback done");
+     return HDF_SUCCESS;
+ }
+ 
+@@ -39,7 +42,10 @@ int32_t DisplayComposerVdiImpl::GetDisplayCapability(uint32_t devId, DisplayCapa
+ {
+     std::lock_guard<std::mutex> lock(mMutex);
+     int32_t ec = HdiSession::GetInstance().CallDisplayFunction(devId, &HdiDisplay::GetDisplayCapability, &info);
+-    DISPLAY_CHK_RETURN(ec != DISPLAY_SUCCESS, HDF_FAILURE, DISPLAY_LOGE("failed, ec=%{public}d", ec));
++    if (ec != DISPLAY_SUCCESS) {
++        comp_kmsg::Print("VDI", "GetDisplayCapability FAIL devId=%u ec=%d", devId, ec);
++        return HDF_FAILURE;
++    }
+     return HDF_SUCCESS;
+ }
+ 
+@@ -368,6 +374,7 @@ int32_t UpdateConfig(std::string& result)
+ 
+ extern "C" IDisplayComposerVdi *CreateComposerVdi()
+ {
++    comp_kmsg::Print("VDI", "CreateComposerVdi called (vdi_impl loaded, pid=%d)", static_cast<int>(getpid()));
+     return new DisplayComposerVdiImpl();
+ }
+ 
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_display.cpp b/common/virt_full/hardware/display/src/display_device/drm_display.cpp
+index 63ffbfd..b9a5702 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_display.cpp
++++ b/common/virt_full/hardware/display/src/display_device/drm_display.cpp
+@@ -222,6 +222,12 @@ int32_t DrmDisplay::ChosePreferenceMode()
+         DISPLAY_CHK_RETURN((num == 0) && (ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("can not get modes"));
+         modeId = 0;
+     }
++    DrmMode chosen;
++    if (mConnector->GetModeFromId(modeId, chosen) == DISPLAY_SUCCESS) {
++        const drmModeModeInfo *mi = chosen.GetModeInfoPtr();
++        DISPLAY_LOGI("chosen mode id %{public}d: %{public}dx%{public}d@%{public}d flags 0x%{public}x",
++            modeId, mi->hdisplay, mi->vdisplay, mi->vrefresh, mi->type);
++    }
+     ret = SetDisplayMode(modeId);
+     // Push first frame to the drm, for that the vblank must init all the componet.
+     DISPLAY_CHK_RETURN((ret != DISPLAY_SUCCESS), DISPLAY_FAILURE, DISPLAY_LOGE("set display mode failed"));
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_encoder.cpp b/common/virt_full/hardware/display/src/display_device/drm_encoder.cpp
+index 84ab6a7..bf386ea 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_encoder.cpp
++++ b/common/virt_full/hardware/display/src/display_device/drm_encoder.cpp
+@@ -14,6 +14,7 @@
+  */
+ 
+ #include "drm_encoder.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+@@ -35,14 +36,18 @@ int32_t DrmEncoder::PickIdleCrtcId(IdMapPtr<DrmCrtc> &crtcs, uint32_t &crtcId)
+         DISPLAY_LOGW("can not find crtc for id %{public}d", mCrtcId);
+         for (crtcIter = crtcs.begin(); crtcIter != crtcs.end(); ++crtcIter) {
+             auto &posCrts = crtcIter->second;
+-            if (mPossibleCrtcs == (1<<posCrts->GetPipe())) {
++            if (mPossibleCrtcs & (1<<posCrts->GetPipe())) {
+                 DISPLAY_LOGD("find crtc id %{public}d, pipe %{public}d", posCrts->GetId(), posCrts->GetPipe());
+                 break;
+             }
+         }
+     }
+-    DISPLAY_CHK_RETURN((crtcIter == crtcs.end()), DISPLAY_FAILURE,
+-        DISPLAY_LOGE("have no crtc %{public}zu ", crtcs.size()));
++    if (crtcIter == crtcs.end()) {
++        DISPLAY_LOGE("have no crtc %{public}zu ", crtcs.size());
++        comp_kmsg::Print("DRM", "Encoder PickIdleCrtcId FAIL: encoder=%u mCrtcId=%u possibleCrtcs=0x%x "
++            "crtcCount=%zu (no matching CRTC)", mEncoderId, mCrtcId, mPossibleCrtcs, crtcs.size());
++        return DISPLAY_FAILURE;
++    }
+     crtc = crtcIter->second;
+     DISPLAY_CHK_RETURN((crtc == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("crtc is null"));
+ 
+diff --git a/common/virt_full/hardware/display/src/display_device/drm_plane.h b/common/virt_full/hardware/display/src/display_device/drm_plane.h
+index 6aadd5e..08b0487 100644
+--- a/common/virt_full/hardware/display/src/display_device/drm_plane.h
++++ b/common/virt_full/hardware/display/src/display_device/drm_plane.h
+@@ -133,6 +133,11 @@ public:
+     {
+         return mPipe;
+     }
++    // DRM fourcc formats advertised by this plane (from drmModeGetPlane).
++    const std::vector<uint32_t> &GetFormats() const
++    {
++        return mFormats;
++    }
+     std::string GetName()
+     {
+         return mName;
+diff --git a/common/virt_full/hardware/display/src/display_device/hdi_device_interface.cpp b/common/virt_full/hardware/display/src/display_device/hdi_device_interface.cpp
+index d46b984..5121cfc 100644
+--- a/common/virt_full/hardware/display/src/display_device/hdi_device_interface.cpp
++++ b/common/virt_full/hardware/display/src/display_device/hdi_device_interface.cpp
+@@ -14,9 +14,11 @@
+  */
+ 
+ #include "hdi_device_interface.h"
++#include <cerrno>
+ #include <vector>
+ #include "display_log.h"
+ #include "drm_device.h"
++#include "comp_kmsg.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+@@ -24,20 +26,27 @@ namespace DISPLAY {
+ std::vector<std::shared_ptr<HdiDeviceInterface>> HdiDeviceInterface::DiscoveryDevice()
+ {
+     DISPLAY_LOGI("DiscoveryDevice begin");
++    comp_kmsg::Print("DISCOVERY", "DiscoveryDevice begin");
+     int ret;
+     std::vector<std::shared_ptr<HdiDeviceInterface>> devices;
+     std::shared_ptr<HdiDeviceInterface> drmDevice = DrmDevice::Create();
+     if (!drmDevice) {
+-        DISPLAY_LOGE("can not create drm device");
++        DISPLAY_LOGE("no DRM device available, skip HDI init");
++        comp_kmsg::Print("DISCOVERY", "FAIL: DrmDevice::Create returned null (no usable /dev/dri/card*, errno=%d %s)",
++            errno, strerror(errno));
++        return devices;
+     }
+     ret = drmDevice->Init();
+     if (ret == DISPLAY_SUCCESS) {
+         DISPLAY_LOGI("DiscoveryDevice drm device init success");
++        comp_kmsg::Print("DISCOVERY", "DrmDevice::Init OK");
+         devices.push_back(std::move(drmDevice));
+     } else {
+         DISPLAY_LOGE("drm device init failed");
++        comp_kmsg::Print("DISCOVERY", "FAIL: DrmDevice::Init ret=%d errno=%d(%s)", ret, errno, strerror(errno));
+     }
+     DISPLAY_LOGI("DiscoveryDevice end count=%{public}zu", devices.size());
++    comp_kmsg::Print("DISCOVERY", "DiscoveryDevice end devices=%zu", devices.size());
+     return devices;
+ }
+ }
+diff --git a/common/virt_full/hardware/display/src/display_device/hdi_drm_composition.cpp b/common/virt_full/hardware/display/src/display_device/hdi_drm_composition.cpp
+index b998b21..53a870c 100644
+--- a/common/virt_full/hardware/display/src/display_device/hdi_drm_composition.cpp
++++ b/common/virt_full/hardware/display/src/display_device/hdi_drm_composition.cpp
+@@ -146,7 +146,7 @@ int32_t HdiDrmComposition::ApplyPlane(HdiDrmLayer &layer,
+ 
+ 
+     // set fb id
+-    DrmGemBuffer *gemBuffer = layer.GetGemBuffer();
++    DrmGemBuffer *gemBuffer = layer.GetGemBuffer(drmPlane.GetFormats());
+     DISPLAY_CHK_RETURN((gemBuffer == nullptr), DISPLAY_FAILURE, DISPLAY_LOGE("current gemBuffer is nullptr"));
+     DISPLAY_CHK_RETURN((!gemBuffer->IsValid()), DISPLAY_FAILURE, DISPLAY_LOGE("the DrmGemBuffer is invalid"));
+     ret = drmModeAtomicAddProperty(pset, drmPlane.GetId(), drmPlane.GetPropFbId(), gemBuffer->GetFbId());
+diff --git a/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.cpp b/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.cpp
+index e1c830f..bb9573d 100644
+--- a/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.cpp
++++ b/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.cpp
+@@ -14,21 +14,47 @@
+  */
+ 
+ #include "hdi_drm_layer.h"
++#include <algorithm>
+ #include <cinttypes>
+ #include <cerrno>
++#include <vector>
+ #include "display_log.h"
+ #include "drm_device.h"
+ 
+ namespace OHOS {
+ namespace HDI {
+ namespace DISPLAY {
+-DrmGemBuffer::DrmGemBuffer(int drmFd, HdiLayerBuffer &hdl) : mDrmFd(drmFd)
++namespace {
++// Build the DRM fourcc candidate list for a layer buffer, most-correct first:
++//  1. exact mapping of hdl.GetFormat() to the real in-memory layout;
++//  2. legacy ConvertToDrmFormat() mapping (QEMU relies on XRGB8888 + kernel patch);
++//  3. generic fallbacks.
++// The list is then filtered against the plane's advertised formats when known.
++std::vector<uint32_t> BuildFormatCandidates(const HdiLayerBuffer &hdl)
++{
++    const PixelFormat pixFmt = static_cast<PixelFormat>(hdl.GetFormat());
++    std::vector<uint32_t> candidates;
++    auto pushUnique = [&candidates](uint32_t fmt) {
++        if ((fmt != 0) && (std::find(candidates.begin(), candidates.end(), fmt) == candidates.end())) {
++            candidates.push_back(fmt);
++        }
++    };
++    pushUnique(DrmDevice::ConvertToDrmFormatExact(pixFmt));
++    pushUnique(DrmDevice::ConvertToDrmFormat(pixFmt));
++    pushUnique(DRM_FORMAT_XRGB8888);
++    pushUnique(DRM_FORMAT_ARGB8888);
++    return candidates;
++}
++} // namespace
++
++DrmGemBuffer::DrmGemBuffer(int drmFd, HdiLayerBuffer &hdl, const std::vector<uint32_t> &supportedFormats)
++    : mDrmFd(drmFd)
+ {
+     DISPLAY_LOGD();
+-    Init(mDrmFd, hdl);
++    Init(mDrmFd, hdl, supportedFormats);
+ }
+ 
+-void DrmGemBuffer::Init(int drmFd, HdiLayerBuffer &hdl)
++void DrmGemBuffer::Init(int drmFd, HdiLayerBuffer &hdl, const std::vector<uint32_t> &supportedFormats)
+ {
+     int ret;
+     const int MAX_COUNT = 4;
+@@ -37,19 +63,58 @@ void DrmGemBuffer::Init(int drmFd, HdiLayerBuffer &hdl)
+     uint32_t offsets[MAX_COUNT] = {0};
+     DISPLAY_LOGD("hdl %{public}" PRIx64 "", hdl.GetPhysicalAddr());
+     DISPLAY_CHK_RETURN_NOT_VALUE((drmFd < 0), DISPLAY_LOGE("can not init drmfd %{public}d", drmFd));
+-    mDrmFormat = DrmDevice::ConvertToDrmFormat(static_cast<PixelFormat>(hdl.GetFormat()));
+     ret = drmPrimeFDToHandle(drmFd, hdl.GetFb(), &mGemHandle);
+     DISPLAY_CHK_RETURN_NOT_VALUE((ret != 0), DISPLAY_LOGE("can not get handle errno %{public}d", errno));
+ 
+     pitches[0] = hdl.GetStride();
+     gemHandles[0] = mGemHandle;
+     offsets[0] = 0;
+-    ret = drmModeAddFB2(drmFd, hdl.GetWight(), hdl.GetHeight(), DRM_FORMAT_XRGB8888, gemHandles, pitches, offsets, &mFdId, 0);
++
++    std::vector<uint32_t> candidates = BuildFormatCandidates(hdl);
++    // Prefer a candidate the plane actually advertises (QEMU advertises only XR24,
++    // so this keeps the previous behaviour; real HW picks the exact format).
++    if (!supportedFormats.empty()) {
++        for (const auto &fmt : candidates) {
++            if (std::find(supportedFormats.begin(), supportedFormats.end(), fmt) != supportedFormats.end()) {
++                mDrmFormat = fmt;
++                break;
++            }
++        }
++        if (mDrmFormat == DRM_FORMAT_INVALID) {
++            DISPLAY_LOGW("no candidate format advertised by plane, will probe by addfb");
++        }
++    }
++
++    if (mDrmFormat != DRM_FORMAT_INVALID) {
++        ret = drmModeAddFB2(drmFd, hdl.GetWight(), hdl.GetHeight(), mDrmFormat,
++            gemHandles, pitches, offsets, &mFdId, 0);
++        if (ret == 0) {
++            DISPLAY_LOGI("addfb ok: hdlFmt %{public}d -> drmFmt 0x%{public}x (plane-advertised)",
++                hdl.GetFormat(), mDrmFormat);
++            return;
++        }
++        DISPLAY_LOGW("addfb with plane-advertised fmt 0x%{public}x failed errno %{public}d, probing",
++            mDrmFormat, errno);
++        mDrmFormat = DRM_FORMAT_INVALID;
++    }
++
++    // Fallback: probe candidates in order until the driver accepts one.
++    for (const auto &fmt : candidates) {
++        ret = drmModeAddFB2(drmFd, hdl.GetWight(), hdl.GetHeight(), fmt,
++            gemHandles, pitches, offsets, &mFdId, 0);
++        if (ret == 0) {
++            mDrmFormat = fmt;
++            DISPLAY_LOGI("addfb ok: hdlFmt %{public}d -> drmFmt 0x%{public}x (probed)",
++                hdl.GetFormat(), mDrmFormat);
++            return;
++        }
++    }
++
++    DISPLAY_LOGE("can not add fb for any candidate format, hdlFmt %{public}d errno %{public}d",
++        hdl.GetFormat(), errno);
+     DISPLAY_LOGD("mGemHandle %{public}d  mFdId %{public}d", mGemHandle, mFdId);
+-    DISPLAY_LOGD("w: %{public}d  h: %{public}d mDrmFormat : %{public}d gemHandles: %{public}d pitches: %{public}d "
+-        "offsets: %{public}d",
+-        hdl.GetWight(), hdl.GetHeight(), mDrmFormat, gemHandles[0], pitches[0], offsets[0]);
+-    DISPLAY_CHK_RETURN_NOT_VALUE((ret != 0), DISPLAY_LOGE("can not add fb errno %{public}d", errno));
++    DISPLAY_LOGD("w: %{public}d  h: %{public}d gemHandles: %{public}d pitches: %{public}d offsets: %{public}d",
++        hdl.GetWight(), hdl.GetHeight(), gemHandles[0], pitches[0], offsets[0]);
+ }
+ 
+ DrmGemBuffer::~DrmGemBuffer()
+@@ -76,10 +141,11 @@ bool DrmGemBuffer::IsValid()
+     return (mGemHandle != INVALID_DRM_ID) && (mFdId != INVALID_DRM_ID);
+ }
+ 
+-DrmGemBuffer *HdiDrmLayer::GetGemBuffer()
++DrmGemBuffer *HdiDrmLayer::GetGemBuffer(const std::vector<uint32_t> &supportedFormats)
+ {
+     DISPLAY_LOGD();
+-    std::unique_ptr<DrmGemBuffer> ptr = std::make_unique<DrmGemBuffer>(DrmDevice::GetDrmFd(), *GetCurrentBuffer());
++    std::unique_ptr<DrmGemBuffer> ptr =
++        std::make_unique<DrmGemBuffer>(DrmDevice::GetDrmFd(), *GetCurrentBuffer(), supportedFormats);
+     mLastBuffer = std::move(mCurrentBuffer);
+     mCurrentBuffer = std::move(ptr);
+     return mCurrentBuffer.get();
+diff --git a/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.h b/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.h
+index b8eaef3..590a8ae 100644
+--- a/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.h
++++ b/common/virt_full/hardware/display/src/display_device/hdi_drm_layer.h
+@@ -15,6 +15,7 @@
+ 
+ #ifndef HDI_DRM_LAYER_H
+ #define HDI_DRM_LAYER_H
++#include <vector>
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
+ #include "buffer_handle.h"
+@@ -28,7 +29,7 @@ namespace DISPLAY {
+ const int INVALID_DRM_ID = 0;
+ class DrmGemBuffer {
+ public:
+-    DrmGemBuffer(int drmFd, HdiLayerBuffer &hdl);
++    DrmGemBuffer(int drmFd, HdiLayerBuffer &hdl, const std::vector<uint32_t> &supportedFormats);
+     virtual ~DrmGemBuffer();
+     uint32_t GetFbId() const
+     {
+@@ -37,7 +38,7 @@ public:
+     bool IsValid();
+ 
+ private:
+-    void Init(int drmFd, HdiLayerBuffer &hdl);
++    void Init(int drmFd, HdiLayerBuffer &hdl, const std::vector<uint32_t> &supportedFormats);
+     uint32_t mGemHandle = 0;
+     uint32_t mFdId = 0;
+     int mDrmFd = -1; // the fd can not close. the other module will close it.
+@@ -49,7 +50,7 @@ public:
+     explicit HdiDrmLayer(LayerType type) : HdiLayer(type) {}
+     ~HdiDrmLayer() override {}
+     // Return value optimization
+-    DrmGemBuffer *GetGemBuffer();
++    DrmGemBuffer *GetGemBuffer(const std::vector<uint32_t> &supportedFormats);
+ 
+ private:
+     std::unique_ptr<DrmGemBuffer> mCurrentBuffer;
+diff --git a/common/virt_full/hardware/display/src/display_device/hdi_session.cpp b/common/virt_full/hardware/display/src/display_device/hdi_session.cpp
+index 8e5c693..ba711c2 100644
+--- a/common/virt_full/hardware/display/src/display_device/hdi_session.cpp
++++ b/common/virt_full/hardware/display/src/display_device/hdi_session.cpp
+@@ -21,6 +21,7 @@
+ #include "v1_0/display_composer_type.h"
+ #include "hdf_trace.h"
+ #include "hdi_netlink_monitor.h"
++#include "comp_kmsg.h"
+ 
+ #define DISPLAY_TRACE HdfTrace trace(__func__, "HDI:DISP:")
+ 
+@@ -38,8 +39,10 @@ HdiSession &HdiSession::GetInstance()
+ void HdiSession::Init()
+ {
+     DISPLAY_LOGI("HdiSession Init begin");
++    comp_kmsg::Print("SESSION", "HdiSession Init begin");
+     mHdiDevices = HdiDeviceInterface::DiscoveryDevice();
+     DISPLAY_LOGI("HdiSession Init devices size %{public}zu", mHdiDevices.size());
++    comp_kmsg::Print("SESSION", "DiscoveryDevice returned %zu device(s)", mHdiDevices.size());
+     mHdiDisplays.clear();
+     for (auto device : mHdiDevices) {
+         auto displays = device->DiscoveryDisplay();
+@@ -48,13 +51,18 @@ void HdiSession::Init()
+          * in rockchip platform.
+          */
+         for (auto display : displays) {
++            comp_kmsg::Print("SESSION", "DiscoveryDisplay batch: registering display id=%u ...", display.first);
+             mHdiDisplays[display.first] = display.second;
++            comp_kmsg::Print("SESSION", "DiscoveryDisplay batch: registered display id=%u (total=%zu)",
++                display.first, mHdiDisplays.size());
+         }
+         DISPLAY_LOGI("HdiSession Init discovered display batch size %{public}zu", displays.size());
++        comp_kmsg::Print("SESSION", "DiscoveryDisplay batch=%zu", displays.size());
+     }
+     mNetLinkMonitor = std::make_shared<HdiNetLinkMonitor>();
+     mNetLinkMonitor->Init();
+     DISPLAY_LOGI("HdiSession Init end total displays %{public}zu", mHdiDisplays.size());
++    comp_kmsg::Print("SESSION", "HdiSession Init end total displays=%zu", mHdiDisplays.size());
+ }
+ 
+ void HdiSession::HandleHotplug(bool plugIn)
+diff --git a/common/virt_full/hardware/display/src/display_gralloc/display_gralloc_gbm.cpp b/common/virt_full/hardware/display/src/display_gralloc/display_gralloc_gbm.cpp
+index b093736..476ab6e 100644
+--- a/common/virt_full/hardware/display/src/display_gralloc/display_gralloc_gbm.cpp
++++ b/common/virt_full/hardware/display/src/display_gralloc/display_gralloc_gbm.cpp
+@@ -33,6 +33,7 @@
+ #include "hdf_dlist.h"
+ #include "display_gralloc_private.h"
+ #include "display_log.h"
++#include "drm_node_utils.h"
+ #include "v1_0/display_composer_type.h"
+ 
+ namespace OHOS {
+@@ -41,7 +42,8 @@ namespace DISPLAY {
+ using namespace OHOS::HDI::Display::Composer::V1_0;
+ using namespace OHOS::HDI::Display::Buffer::V1_0;
+ 
+-const char *g_drmFileNode = "/dev/dri/card0";
++// Last-resort fallback; the actual node is enumerated at init (see drm_node_utils.h).
++const char *g_drmFileNode = DEFAULT_DRM_NODE;
+ static GrallocManager *g_grallocManager = nullptr;
+ static pthread_mutex_t g_lock;
+ 
+@@ -434,7 +436,12 @@ int32_t GbmGrallocInitialize(void)
+     GrallocManager *grallocManager = GetGrallocManager();
+     DISPLAY_CHK_RETURN((grallocManager == nullptr), HDF_ERR_INVALID_PARAM, DISPLAY_LOGE("gralloc manager failed"); \
+         GRALLOC_UNLOCK());
+-    int ret = InitGbmDevice(g_drmFileNode, grallocManager);
++    std::string drmNode = FindPreferredDrmNode();
++    if (drmNode.empty()) {
++        drmNode = g_drmFileNode;
++    }
++    DISPLAY_LOGI("gralloc init using DRM node %{public}s", drmNode.c_str());
++    int ret = InitGbmDevice(drmNode.c_str(), grallocManager);
+     DISPLAY_CHK_RETURN((ret != HDF_SUCCESS), ret, DISPLAY_LOGE("gralloc manager failed"); \
+         GRALLOC_UNLOCK());
+     grallocManager->referCount++;

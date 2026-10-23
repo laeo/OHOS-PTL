@@ -1,0 +1,151 @@
+# Copyright (c) 2026 OpenHarmony PC Image Contributors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import("//build/ohos.gni")
+
+_diag_subsystem = "startup"
+_diag_part = "pc_ohos_diag"
+_diag_images = [ system_base_dir ]
+
+ohos_prebuilt_etc("diag_main_script") {
+  source = "ohos-diag"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("diag_boot_script") {
+  source = "zz_diag_boot.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("diag_shutdown_script") {
+  source = "zz_diag_shutdown.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("perf_script") {
+  source = "zz_perf.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("perf_init_cfg") {
+  source = "etc/zz_perf.cfg"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "etc/init"
+}
+
+ohos_prebuilt_etc("diag_init_cfg") {
+  source = "etc/zz_diag.cfg"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "etc/init"
+}
+
+# Early full-kernel-log capture: an init service with start-mode "boot" that
+# dumps the complete ring buffer (SOF/HDA/btintel/iwlwifi/xe probe messages)
+# to /sys_prod/dmesg_boot.log before the ring buffer can wrap.
+ohos_prebuilt_etc("dmesg_boot_script") {
+  source = "zz_dmesg_boot.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("dmesg_boot_init_cfg") {
+  source = "etc/zz_dmesg_boot.cfg"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "etc/init"
+}
+
+# Persistent hilog tasks (bluetooth domains at DEBUG + kmsg) so that the
+# content is on disk instead of only in the 5000-line ring buffer.
+ohos_prebuilt_etc("hilog_persist_script") {
+  source = "zz_hilog_persist.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("hilog_persist_init_cfg") {
+  source = "etc/zz_hilog_persist.cfg"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "etc/init"
+}
+
+# One-shot playback-path sanity pass: the HDA codec comes up muted / at zero
+# gain and the SOF DAI mixers may sit at 0 (= digital silence), which is
+# indistinguishable from "the system has no sound".
+ohos_prebuilt_etc("audioup_script") {
+  source = "zz_audioup.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+# Keeps the SOF DAI mixers at their maximum: SOF re-initialises the DAI-link
+# gain widgets when a stream is instantiated, so a one-shot pass at boot can be
+# undone by the first playback (0 == digital silence).
+ohos_prebuilt_etc("audioguard_script") {
+  source = "zz_audioguard.sh"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "bin"
+}
+
+ohos_prebuilt_etc("audio_init_cfg") {
+  source = "etc/zz_audio.cfg"
+  subsystem_name = _diag_subsystem
+  part_name = _diag_part
+  install_images = _diag_images
+  module_install_dir = "etc/init"
+}
+
+group("pc_ohos_diag") {
+  deps = [
+    ":audio_init_cfg",
+    ":audioguard_script",
+    ":audioup_script",
+    ":diag_boot_script",
+    ":diag_init_cfg",
+    ":diag_main_script",
+    ":diag_shutdown_script",
+    ":dmesg_boot_init_cfg",
+    ":dmesg_boot_script",
+    ":hilog_persist_init_cfg",
+    ":hilog_persist_script",
+    ":perf_init_cfg",
+    ":perf_script",
+  ]
+}

@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+*.log
+*.hap
+*.p12
+*.p7b
+*.cer
+*.pem
+signing/
+.DS_Store

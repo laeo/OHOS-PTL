@@ -1,0 +1,24 @@
+diff --git a/include/config.h b/include/config.h
+index 508473cd..5b1bcee9 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -7,8 +7,17 @@
+ /* Directory with aload* device files */
+ #define ALOAD_DEVICE_DIRECTORY "/dev/"
+ 
+-/* directory containing ALSA configuration database */
+-#define ALSA_CONFIG_DIR "/vendor/etc/audio/alsa/share"
++/* directory containing ALSA configuration database.
++ * NOTE (pc_ptl / x86_64 porting): must match where the alsa-lib conf tree is
++ * actually installed.  third_party/alsa-lib/src/conf/BUILD.gn uses
++ * ohos_prebuilt_etc with relative_install_dir="audio/alsa/share" and the
++ * default install_images, i.e. system/etc/audio/alsa/share -- NOT vendor.
++ * Pointing at /vendor made snd_config load an empty global config, so
++ * `snd_pcm_open("hw:0,0")` / `snd_ctl_open("hw:0")` had no config at all
++ * (see fix_audio_alsa SUMMARY §1.4/§7.2).  /system is also mounted in every
++ * mount namespace, /vendor is not guaranteed to be.
++ */
++#define ALSA_CONFIG_DIR "/system/etc/audio/alsa/share"
+ 
+ /* Enable assert at error message handler */
+ /* #undef ALSA_DEBUG_ASSERT */

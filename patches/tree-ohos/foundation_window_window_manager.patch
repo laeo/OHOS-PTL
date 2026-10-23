@@ -1,0 +1,48 @@
+diff --git a/interfaces/kits/napi/environmental/package.json b/interfaces/kits/napi/environmental/package.json
+index 036e374c03..96cc1430d9 100644
+--- a/interfaces/kits/napi/environmental/package.json
++++ b/interfaces/kits/napi/environmental/package.json
+@@ -11,4 +11,3 @@
+   "author": "window",
+   "license": "Apache-2.0"
+ }
+-  
+\ No newline at end of file
+diff --git a/window_scene/screen_session_manager/src/screen_session_manager.cpp b/window_scene/screen_session_manager/src/screen_session_manager.cpp
+index cd1db3fa5c..609a645bb1 100644
+--- a/window_scene/screen_session_manager/src/screen_session_manager.cpp
++++ b/window_scene/screen_session_manager/src/screen_session_manager.cpp
+@@ -1888,7 +1888,7 @@ void ScreenSessionManager::OnScreenChangeDefault(ScreenId screenId, ScreenEvent
+         return;
+     }
+     if (g_isPcDevice) {
+-        auto physicalScreenSession = GetOrCreatePhysicalScreenSession(screenId);
++        auto physicalScreenSession = GetOrCreatePhysicalScreenSession(screenId, connectToRenderToken);
+         if (!physicalScreenSession) {
+             TLOGNFE(WmsLogTag::DMS, "physicalScreenSession is nullptr");
+             return;
+@@ -2542,7 +2542,8 @@ void ScreenSessionManager::UpdateScreenTypeInfo(sptr<ScreenSession> screenSessio
+         }
+     }
+     screenSession->SetScreenTypeInfo(typeInfo);
+-    auto phyScreenSession = GetOrCreatePhysicalScreenSession(screenSession->GetRSScreenId());
++    auto phyScreenSession = GetOrCreatePhysicalScreenSession(screenSession->GetRSScreenId(),
++        screenSession->GetRenderSession());
+     if (phyScreenSession == nullptr) {
+         return;
+     }
+diff --git a/window_scene/session/screen/src/screen_session.cpp b/window_scene/session/screen/src/screen_session.cpp
+index 2c251699f4..1d303d2660 100644
+--- a/window_scene/session/screen/src/screen_session.cpp
++++ b/window_scene/session/screen/src/screen_session.cpp
+@@ -80,7 +80,9 @@ ScreenSession::ScreenSession(const ScreenSessionConfig& config, ScreenSessionRea
+     sessionId_ = sessionIdGenerator_++;
+     RSAdapterUtil::InitRSUIDirector(rsUIDirector_, config.renderSession);
+     RSAdapterUtil::SetRSUIContext(displayNode_, GetRSUIContext(), true);
+-    RSUIContextContainer::SetRenderSession(config.renderSession);
++    if (config.renderSession != nullptr) {
++        RSUIContextContainer::SetRenderSession(config.renderSession);
++    }
+     Rosen::RSDisplayNodeConfig rsConfig;
+     bool isNeedCreateDisplayNode = true;
+     property_.SetRsId(rsId_);

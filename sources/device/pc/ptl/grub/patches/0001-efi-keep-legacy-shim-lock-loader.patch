@@ -1,0 +1,85 @@
+From: OpenHarmony PC team
+Subject: [PATCH] efi: keep the legacy (GRUB owned) shim_lock kernel loader
+
+Upstream GRUB 2.14 falls back to grub_cmd_linux_x86_legacy() - i.e. GRUB
+loads the kernel itself through the EFI handover protocol - whenever the
+legacy shim_lock verifier protocol is in use.  The firmware's LoadImage is
+then never involved, so the kernel only has to be trusted by shim (MOK),
+not by the firmware db.
+
+The Debian/Ubuntu package removes that fallback
+(debian/patches/secure-boot/disable-efi-fallback-to-legacy.patch).  With
+shim 15.8 (which implements only shim_lock, not SHIM_IMAGE_LOADER_GUID)
+the distribution GRUB therefore asks the firmware to load the kernel, the
+firmware only trusts db, and the boot fails with
+
+    error: cannot load image.
+
+We build from pristine upstream, so the fallback is present.  This patch
+keeps it reachable and adds an explicit opt-in knob
+(ohos_force_legacy_loader=1) that forces the GRUB owned loader even with a
+shim that implements SHIM_IMAGE_LOADER_GUID.
+
+Signed-off-by: OpenHarmony PC team
+---
+--- a/grub-core/loader/efi/linux.c
++++ b/grub-core/loader/efi/linux.c
+@@ -18,6 +18,7 @@
+ 
+ #include <grub/charset.h>
+ #include <grub/command.h>
++#include <grub/env.h>
+ #include <grub/err.h>
+ #include <grub/file.h>
+ #include <grub/fdt.h>
+@@ -483,6 +484,50 @@
+ 
+   grub_dl_ref (my_mod);
+ 
++  /* OHOS: keep the legacy (GRUB owned) x86 kernel loader reachable.
++   *
++   * Upstream GRUB loads the kernel through the firmware (grub_efi_linux_boot
++   * -> EFI LoadImage) unless the legacy shim_lock protocol is in use, in which
++   * case it falls back to grub_cmd_linux_x86_legacy(), i.e. GRUB loads the
++   * kernel itself (EFI handover) and the firmware never verifies it again.
++   *
++   * That fallback is what makes a MOK-only Secure Boot setup work: the kernel
++   * file is verified by shim through the shim_lock verifier (MokListRT), and
++   * because GRUB - not the firmware - performs the load, the firmware's "db"
++   * never has to know our certificate.
++   *
++   * The Debian/Ubuntu build of GRUB 2.14 removes this fallback
++   * (debian/patches/secure-boot/disable-efi-fallback-to-legacy.patch), which
++   * is why the distribution GRUB fails with "error: cannot load image." on a
++   * MOK-only machine.  We build from pristine upstream, so the fallback is
++   * there; the ohos_force_legacy_loader knob below additionally allows
++   * forcing the GRUB owned loader even when shim implements the newer
++   * SHIM_IMAGE_LOADER_GUID protocol (shim >= 16).
++   */
++  {
++    const char *force_legacy = grub_env_get ("ohos_force_legacy_loader");
++    int forced = (force_legacy != NULL
++		  && (force_legacy[0] == '1' || force_legacy[0] == 'y'
++		      || force_legacy[0] == 'Y'));
++
++#if defined(__i386__) || defined(__x86_64__)
++    if (forced && grub_is_using_legacy_shim_lock_protocol () != true)
++      {
++	grub_dprintf ("linux", "ohos_force_legacy_loader=1: using the legacy x86 kernel loader\n");
++
++	err = grub_cmd_linux_x86_legacy (cmd, argc, argv);
++
++	if (err == GRUB_ERR_NONE)
++	  return GRUB_ERR_NONE;
++	else
++	  goto fail;
++      }
++#else
++    if (forced)
++      grub_dprintf ("linux", "ohos_force_legacy_loader=1: ignored, not an x86 build\n");
++#endif
++  }
++
+   if (grub_is_using_legacy_shim_lock_protocol () == true)
+     {
+ #if defined(__i386__) || defined(__x86_64__)
